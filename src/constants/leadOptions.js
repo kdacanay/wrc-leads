@@ -27,6 +27,7 @@ export const ENGAGEMENT_LEVEL_OPTIONS = [
 ];
 
 export const RELATIONSHIP_RANK_OPTIONS = [
+    {value: "0", label: "0% or new lead" },
   { value: "18", label: "18% likelihood" },
   { value: "34", label: "34% likelihood" },
   { value: "56", label: "56% likelihood" },

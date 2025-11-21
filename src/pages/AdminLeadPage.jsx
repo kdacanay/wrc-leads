@@ -9,7 +9,6 @@ import {
   updateDoc,
   serverTimestamp,
   arrayUnion,
-  deleteDoc,
 } from "firebase/firestore";
 
 import LeadBadge from "../components/LeadBadge";
@@ -30,6 +29,10 @@ export default function AdminLeadPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // 🔹 New: local state for action item editing
+  const [actionItemDraft, setActionItemDraft] = useState("");
+  const [savingActionItem, setSavingActionItem] = useState(false);
+  const [actionItemJustSaved, setActionItemJustSaved] = useState(false);
 
   useEffect(() => {
     if (!leadId) return;
@@ -39,7 +42,11 @@ export default function AdminLeadPage() {
       ref,
       (snap) => {
         if (snap.exists()) {
-          setLead({ id: snap.id, ...snap.data() });
+          const data = { id: snap.id, ...snap.data() };
+          setLead(data);
+
+          // keep draft in sync when lead changes in Firestore
+          setActionItemDraft(data.actionItem || "");
         } else {
           setLead(null);
         }
@@ -87,6 +94,53 @@ export default function AdminLeadPage() {
     setSaving(false);
   }
 
+  // 🔹 New: save action item with journal + latestActivity
+  async function handleSaveActionItem() {
+    if (!lead) return;
+
+    const trimmed = (actionItemDraft || "").trim();
+    const ref = doc(db, "leads", lead.id);
+
+    const text = trimmed
+      ? `Admin updated action item: "${trimmed}"`
+      : "Admin cleared action item.";
+
+    setSavingActionItem(true);
+    setActionItemJustSaved(false);
+
+    try {
+      await updateDoc(ref, {
+        actionItem: trimmed || "",
+        updatedAt: serverTimestamp(),
+        updatedBy: user.uid,
+
+        journalLastEntry: text,
+        journal: arrayUnion({
+          id: crypto.randomUUID(),
+          createdAt: new Date(),
+          createdBy: user.uid,
+          createdByEmail: user.email,
+          text,
+          type: "action-item",
+        }),
+
+        latestActivity: text,
+      });
+
+      setActionItemJustSaved(true);
+
+      // little ✓ Saved badge disappears after ~2 seconds
+      setTimeout(() => {
+        setActionItemJustSaved(false);
+      }, 2000);
+    } catch (err) {
+      console.error("Error saving action item:", err);
+      alert("Error saving action item. Check console for details.");
+    } finally {
+      setSavingActionItem(false);
+    }
+  }
+
   if (loading) {
     return <div className="text-sm text-gray-600">Loading lead...</div>;
   }
@@ -96,21 +150,20 @@ export default function AdminLeadPage() {
   }
 
   return (
-    
     <div className="space-y-6 text-sm">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-  <h1 className="text-lg font-semibold text-gray-900">
-    Lead Details
-  </h1>
-  <button
-    type="button"
-    onClick={() => navigate("/admin")}
-    className="text-xs px-3 py-1.5 rounded-full border border-gray-300 text-gray-700 hover:bg-gray-50"
-  >
-    ← Back to dashboard
-  </button>
-</div>
+        <h1 className="text-lg font-semibold text-gray-900">
+          Lead Details
+        </h1>
+        <button
+          type="button"
+          onClick={() => navigate("/admin")}
+          className="text-xs px-3 py-1.5 rounded-full border border-gray-300 text-gray-700 hover:bg-gray-50"
+        >
+          ← Back to dashboard
+        </button>
+      </div>
 
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
@@ -144,6 +197,58 @@ export default function AdminLeadPage() {
               lead.urgencyRanking
             }
           />
+        </div>
+      </div>
+
+      {/* Existing read-only banner (what agent sees) */}
+      {lead.actionItem && (
+        <div className="border-l-4 border-amber-400 bg-amber-50 p-3 rounded-md text-xs">
+          <div className="font-semibold text-amber-800">
+            Admin action item (visible to agent)
+          </div>
+          <div className="mt-1 text-amber-900 whitespace-pre-line">
+            {lead.actionItem}
+          </div>
+        </div>
+      )}
+
+      {/* 🔹 NEW: Editable Action Item field for admin */}
+      <div className="border border-amber-200 rounded-lg bg-amber-50 p-3 text-xs">
+        <div className="flex items-center justify-between mb-1">
+          <span className="font-semibold text-amber-900">
+            Edit action item for this lead
+          </span>
+          {actionItemJustSaved && (
+            <span className="text-[11px] text-green-700 flex items-center gap-1">
+              ✓ Saved
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-amber-900 mb-2">
+          This note will show in the agent&apos;s dashboard under
+          &quot;Action item.&quot;
+        </p>
+        <textarea
+          rows={3}
+          className="w-full border border-amber-300 rounded px-2 py-1 text-[11px] bg-white"
+          placeholder="Example: Call this lead by Friday to schedule a buyer consult..."
+          value={actionItemDraft}
+          onChange={(e) => setActionItemDraft(e.target.value)}
+        />
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSaveActionItem}
+            disabled={savingActionItem}
+            className="px-3 py-1.5 rounded-full border border-amber-400 bg-amber-100 text-[11px] font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-60"
+          >
+            {savingActionItem ? "Saving..." : "Save action item"}
+          </button>
+          {!actionItemJustSaved && (
+            <span className="text-[10px] text-amber-800">
+              Updates journal + latest activity
+            </span>
+          )}
         </div>
       </div>
 

@@ -1,6 +1,6 @@
 // src/pages/AgentLeadPage.jsx
 import React, { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { db } from "../firebase";
 import {
@@ -21,6 +21,35 @@ import {
   SOURCE_LABELS,
 } from "../constants/leadOptions";
 
+function buildAgentActivitySummary(oldLead, form) {
+  const changes = [];
+
+  if (oldLead.engagementLevel !== form.engagementLevel) {
+    changes.push(`engagement to "${form.engagementLevel || "-"}"`);
+  }
+  if (oldLead.firstAttemptDate !== form.firstAttemptDate) {
+    changes.push("first attempt date");
+  }
+
+  // 🔒 Do NOT track nextEvaluationDate changes from the agent anymore
+  // if (oldLead.nextEvaluationDate !== form.nextEvaluationDate) {
+  //   changes.push("next evaluation date");
+  // }
+
+  if (oldLead.relationshipRanking !== form.relationshipRanking) {
+    changes.push(`relationship to "${form.relationshipRanking || "-"}"`);
+  }
+  if (oldLead.urgencyRanking !== form.urgencyRanking) {
+    changes.push(`urgency to "${form.urgencyRanking || "-"}"`);
+  }
+
+  if (changes.length === 0) {
+    return "Agent saved lead with no field changes.";
+  }
+
+  return `Agent updated ${changes.join(", ")}.`;
+}
+
 function formatDate(value) {
   if (!value) return "";
   if (value.toDate) {
@@ -32,12 +61,13 @@ function formatDate(value) {
 
 export default function AgentLeadPage() {
   const { leadId } = useParams();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [lead, setLead] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-
+const [status, setStatus] = useState({ type: "", message: "" });
   useEffect(() => {
     if (!leadId) return;
     const ref = doc(db, "leads", leadId);
@@ -64,42 +94,58 @@ export default function AgentLeadPage() {
     return () => unsub();
   }, [leadId]);
 
-  async function handleAgentSave(form) {
-    if (!lead) return;
-    setSaving(true);
-    try {
-      const ref = doc(db, "leads", lead.id);
+ async function handleAgentSave(form) {
+  if (!lead) return;
+  setSaving(true);
+  setStatus({ type: "", message: "" });
 
-      const updateData = {
-        firstAttemptDate: form.firstAttemptDate || null,
-        engagementLevel: form.engagementLevel,
-        nextEvaluationDate: form.nextEvaluationDate || null,
-        relationshipRanking: form.relationshipRanking,
-        urgencyRanking: form.urgencyRanking,
-        updatedAt: serverTimestamp(),
-        updatedBy: user.uid,
-      };
+  try {
+    const ref = doc(db, "leads", lead.id);
 
-      const trimmedNote = form.journalEntry?.trim();
-      if (trimmedNote) {
-        updateData.journalLastEntry = trimmedNote;
-        updateData.journal = arrayUnion({
-          id: crypto.randomUUID(),
-          createdAt: new Date(), // array: must NOT use serverTimestamp
-          createdBy: user.uid,
-          createdByEmail: user.email,
-          text: trimmedNote,
-        });
-      }
+    // Build a summary of what changed
+    const summary = buildAgentActivitySummary(lead, form);
 
-      await updateDoc(ref, updateData);
-    } catch (err) {
-      console.error("Error updating lead:", err);
-      alert("Error updating lead. Check console for details.");
-    } finally {
-      setSaving(false);
+    const updateData = {
+      firstAttemptDate: form.firstAttemptDate || null,
+      engagementLevel: form.engagementLevel,
+      // nextEvaluationDate is admin-only now, so we skip it
+      relationshipRanking: form.relationshipRanking,
+      urgencyRanking: form.urgencyRanking,
+      updatedAt: serverTimestamp(),
+      updatedBy: user.uid,
+      latestActivity: summary,
+    };
+
+    const trimmedNote = form.journalEntry?.trim();
+
+    if (trimmedNote && trimmedNote !== lead.journalLastEntry) {
+      updateData.journalLastEntry = trimmedNote;
+      updateData.journal = arrayUnion({
+        id: crypto.randomUUID(),
+        createdAt: new Date(),
+        createdBy: user.uid,
+        createdByEmail: user.email,
+        text: trimmedNote,
+        type: "note",
+      });
+
+      updateData.latestActivity = `Agent added note: "${trimmedNote}"`;
     }
+
+    await updateDoc(ref, updateData);
+
+    setStatus({ type: "success", message: "Changes saved." });
+    setTimeout(() => {
+      setStatus({ type: "", message: "" });
+    }, 3000);
+  } catch (err) {
+    console.error("Error updating lead:", err);
+    alert("Error updating lead. Check console for details.");
+    setStatus({ type: "error", message: "Error saving changes." });
+  } finally {
+    setSaving(false);
   }
+}
 
   if (loading) {
     return (
@@ -119,6 +165,28 @@ export default function AgentLeadPage() {
 
   return (
     <div className="space-y-5 text-sm">
+      {/* Back button */}
+      <div>
+        <button
+          type="button"
+          onClick={() => navigate("/agent")}
+          className="inline-flex items-center text-xs text-gray-600 hover:text-gray-900 hover:underline mb-2"
+        >
+          ← Back to My Leads
+        </button>
+      </div>
+{status.message && (
+  <div
+    className={`text-xs px-3 py-2 rounded border ${
+      status.type === "success"
+        ? "border-green-200 bg-green-50 text-green-700"
+        : "border-red-200 bg-red-50 text-red-700"
+    }`}
+  >
+    {status.message}
+  </div>
+)}
+
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
         {/* Left: header info */}
         <div>
@@ -148,28 +216,20 @@ export default function AgentLeadPage() {
           </p>
         </div>
 
-        {/* Status badges */}
-        {/* <div className="flex flex-wrap gap-2">
-          <LeadBadge
-            value={lead.status}
-            label={STATUS_LABELS[lead.status] || lead.status}
-          />
-          <LeadBadge
-            value={lead.relationshipRanking}
-            label={
-              RELATIONSHIP_LABELS[lead.relationshipRanking] ||
-              lead.relationshipRanking
-            }
-          />
-          <LeadBadge
-            value={lead.urgencyRanking}
-            label={
-              URGENCY_LABELS[lead.urgencyRanking] ||
-              lead.urgencyRanking
-            }
-          />
-        </div> */}
+        {/* Status badges still optional here */}
       </div>
+
+      {/* 🔶 Admin Action Item banner (read-only) */}
+      {lead.actionItem && (
+        <div className="border-l-4 border-amber-400 bg-amber-50 p-3 rounded-md text-xs">
+          <div className="font-semibold text-amber-800">
+            Admin action item
+          </div>
+          <div className="mt-1 text-amber-900 whitespace-pre-line">
+            {lead.actionItem}
+          </div>
+        </div>
+      )}
 
       {/* Contact & meta */}
       <div className="grid md:grid-cols-3 gap-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
@@ -193,41 +253,69 @@ export default function AgentLeadPage() {
           </div>
         </div>
 
-     <div>
-  <h2 className="text-xs font-semibold text-gray-700 mb-1">
-    Lead details
-  </h2>
-  <div className="text-xs text-gray-800 space-y-0.5">
-    <div>
-      First attempt: {formatDate(lead.firstAttemptDate) || "-"}
-    </div>
-    <div>
-      Next evaluation: {formatDate(lead.nextEvaluationDate) || "-"}
-    </div>
-  </div>
-</div>
-
+        <div>
+          <h2 className="text-xs font-semibold text-gray-700 mb-1">
+            Lead details
+          </h2>
+          <div className="text-xs text-gray-800 space-y-0.5">
+            <div>
+              First attempt: {formatDate(lead.firstAttemptDate) || "-"}
+            </div>
+            <div>
+              {/* 🔒 This is now purely display — still pulled from Firestore, but never changed by this page */}
+              Next evaluation: {formatDate(lead.nextEvaluationDate) || "-"}
+            </div>
+          </div>
+        </div>
 
         <div>
           <h2 className="text-xs font-semibold text-gray-700 mb-1">
             Latest activity
           </h2>
           <div className="text-xs text-gray-800 space-y-0.5">
-        <div className="text-xs text-gray-800 space-y-0.5">
-  <div className="text-gray-700">
-    {lead.journalLastEntry || (
-      <span className="text-gray-400 italic">No recent note.</span>
-    )}
-  </div>
-</div>
+            {(() => {
+              let latestText = "";
+              let latestTime = 0;
 
-            <div className="text-gray-700">
-              {lead.journalLastEntry || (
-                <span className="text-gray-400 italic">
-                  No recent note.
-                </span>
-              )}
-            </div>
+              // 1) Most recent journal entry by createdAt
+              if (Array.isArray(lead.journal) && lead.journal.length > 0) {
+                for (const entry of lead.journal) {
+                  if (!entry) continue;
+
+                  const createdAt = entry.createdAt;
+                  const t = createdAt?.toMillis
+                    ? createdAt.toMillis()
+                    : createdAt
+                    ? new Date(createdAt).getTime()
+                    : 0;
+
+                  if (t >= latestTime && entry.text) {
+                    latestTime = t;
+                    latestText = entry.text;
+                  }
+                }
+              }
+
+              // 2) Fallback to journalLastEntry
+              if (!latestText && lead.journalLastEntry) {
+                latestText = lead.journalLastEntry;
+              }
+
+              // 3) Fallback to latestActivity
+              if (!latestText && lead.latestActivity) {
+                latestText = lead.latestActivity;
+              }
+
+              if (!latestText) {
+                return (
+                  <span className="text-gray-400 italic">
+                    No recent activity.
+                  </span>
+                );
+              }
+
+              return <span className="text-gray-700">{latestText}</span>;
+            })()}
           </div>
         </div>
       </div>

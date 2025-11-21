@@ -23,12 +23,16 @@ export default function LeadFormAgent({ lead, onSave, saving }) {
     setForm((prev) => ({ ...prev, [name]: value }));
   }
 
-  async function handleSubmit(e) {
-    e.preventDefault();
-    await onSave(form);
-    // clear just the journal box after save
-    setForm((prev) => ({ ...prev, journalEntry: "" }));
-  }
+ async function handleSubmit(e) {
+  e.preventDefault();
+  await onSave(form);
+
+  // After a successful save, clear the note box
+  setForm((prev) => ({
+    ...prev,
+    journalEntry: "",
+  }));
+}
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4 text-sm">
@@ -64,18 +68,17 @@ export default function LeadFormAgent({ lead, onSave, saving }) {
           </select>
         </div>
 
-        <div>
-          <label className="block text-xs font-medium mb-1">
-            Next evaluation
-          </label>
-          <input
-            type="date"
-            name="nextEvaluationDate"
-            value={form.nextEvaluationDate || ""}
-            onChange={handleChange}
-            className="w-full border rounded-lg px-2.5 py-1.5"
-          />
-        </div>
+<div>
+  <label className="block text-xs font-semibold text-gray-700 mb-1">
+    Next evaluation
+  </label>
+
+  <div className="text-xs text-gray-800">
+    {form.nextEvaluationDate ? form.nextEvaluationDate : "-"}
+  </div>
+</div>
+
+
       </div>
 
       <div className="grid grid-cols-2 gap-3">

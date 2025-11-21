@@ -142,6 +142,7 @@ useEffect(() => {
                   <th className="px-3 py-2 text-left">Status</th>
                   <th className="px-3 py-2 text-left">Type</th>
                   <th className="px-3 py-2 text-left">Next eval</th>
+                  <th className="px-3 py-2 text-left">Latest activity</th>
                   <th className="px-3 py-2 text-left">Actions</th>
                 </tr>
               </thead>
@@ -185,7 +186,15 @@ useEffect(() => {
                         <span className="text-gray-400 italic">Not set</span>
                       )}
                     </td>
-
+<td className="px-3 py-2 align-top text-[11px]">
+  {lead.latestActivity ? (
+    <span className="text-gray-800">{lead.latestActivity}</span>
+  ) : lead.journalLastEntry ? (
+    <span className="text-gray-800">{lead.journalLastEntry}</span>
+  ) : (
+    <span className="text-gray-400 italic">No activity yet</span>
+  )}
+</td>
                     <td className="px-3 py-2 align-top text-[11px]">
                       <button
                         type="button"

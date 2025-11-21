@@ -19,7 +19,7 @@ const emptyForm = {
   firstAttemptDate: "",
   engagementLevel: "attempt_1",
   nextEvaluationDate: "",
-  relationshipRanking: "18",
+  relationshipRanking: "0",
   urgencyRanking: "unsure",
   source: "other",
   assignedAgentName: "",
