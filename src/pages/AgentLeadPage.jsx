@@ -21,34 +21,130 @@ import {
   SOURCE_LABELS,
 } from "../constants/leadOptions";
 
-function buildAgentActivitySummary(oldLead, form) {
+// You can set this in your .env as VITE_ADMIN_ALERT_EMAIL="you@yourdomain.com"
+const ADMIN_ALERT_EMAIL =
+  import.meta.env.VITE_ADMIN_ALERT_EMAIL || "admin@example.com";
+
+function emailAdminAboutLeadUpdate(lead, activityText, agentUser, adminEmail = ADMIN_ALERT_EMAIL) {
+  if (!adminEmail) {
+    alert(
+      "Admin alert email is not configured. Set VITE_ADMIN_ALERT_EMAIL in your .env file."
+    );
+    return;
+  }
+
+  const url = `${window.location.origin}/admin/lead/${lead.id}`;
+
+  const subject = `Lead updated by ${
+    agentUser?.email || "agent"
+  }: ${(lead.firstName || "") + " " + (lead.lastName || "")}`.trim();
+
+  const bodyLines = [
+    `Hi,`,
+    "",
+    `An agent has updated a lead in the WRC Lead Dashboard.`,
+    "",
+    `Agent: ${agentUser?.email || "(unknown agent)"}`,
+    `Lead: ${(lead.firstName || "") + " " + (lead.lastName || "")} (ID: ${lead.id})`,
+    "",
+    `Summary of latest activity:`,
+    activityText || "(no summary available)",
+    "",
+    `View the lead in your admin dashboard:`,
+    url,
+    "",
+    "Thank you.",
+  ];
+
+  const body = bodyLines.join("\n");
+
+  const mailto = `mailto:${encodeURIComponent(
+    adminEmail
+  )}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+  window.location.href = mailto;
+}
+
+// 🔔 Change this to whatever email should receive agent updates
+// const ADMIN_NOTIFY_EMAIL = "your.email@weichertcr.com";
+
+// function emailAdminAboutLeadUpdate(lead, activityText, agentUser) {
+//   if (!ADMIN_NOTIFY_EMAIL || ADMIN_NOTIFY_EMAIL === "kdacanay@weichertcr.com") {
+//     console.warn(
+//       "ADMIN_NOTIFY_EMAIL is not configured. Update it at the top of AgentLeadPage.jsx."
+//     );
+//     return;
+//   }
+
+//   if (!lead) return;
+
+//   const adminUrl = `${window.location.origin}/admin/lead/${lead.id}`;
+//   const agentNameOrEmail =
+//     agentUser?.displayName || agentUser?.email || "Unknown agent";
+
+//   const subject = `Agent update on lead: ${
+//     lead.firstName || ""
+//   } ${lead.lastName || ""}`.trim();
+
+//   const bodyLines = [
+//     `Hi,`,
+//     "",
+//     `An agent has updated a lead in the WRC Leads app.`,
+//     "",
+//     `Agent: ${agentNameOrEmail}`,
+//     "",
+//     `Lead: ${lead.firstName || ""} ${lead.lastName || ""}`.trim(),
+//     `Lead ID: ${lead.id}`,
+//     "",
+//     `Summary of change:`,
+//     activityText || "(No activity summary provided.)",
+//     "",
+//     `You can view this lead in the admin view here:`,
+//     adminUrl,
+//     "",
+//     "This email was generated from the WRC Leads app.",
+//   ];
+
+//   const mailto = `mailto:${encodeURIComponent(
+//     ADMIN_NOTIFY_EMAIL
+//   )}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(
+//     bodyLines.join("\n")
+//   )}`;
+
+//   window.location.href = mailto;
+// }
+
+function buildAgentActivityChanges(oldLead, form) {
   const changes = [];
 
-  if (oldLead.engagementLevel !== form.engagementLevel) {
-    changes.push(`engagement to "${form.engagementLevel || "-"}"`);
-  }
-  if (oldLead.firstAttemptDate !== form.firstAttemptDate) {
-    changes.push("first attempt date");
+  const before = {
+    relationshipRanking: oldLead.relationshipRanking || "",
+    urgencyRanking: oldLead.urgencyRanking || "",
+  };
+
+  const after = {
+    relationshipRanking: form.relationshipRanking || "",
+    urgencyRanking: form.urgencyRanking || "",
+  };
+
+  if (before.relationshipRanking !== after.relationshipRanking) {
+    changes.push(
+      `relationship to "${after.relationshipRanking || "-"}"`
+    );
   }
 
-  // 🔒 Do NOT track nextEvaluationDate changes from the agent anymore
-  // if (oldLead.nextEvaluationDate !== form.nextEvaluationDate) {
-  //   changes.push("next evaluation date");
-  // }
-
-  if (oldLead.relationshipRanking !== form.relationshipRanking) {
-    changes.push(`relationship to "${form.relationshipRanking || "-"}"`);
-  }
-  if (oldLead.urgencyRanking !== form.urgencyRanking) {
-    changes.push(`urgency to "${form.urgencyRanking || "-"}"`);
+  if (before.urgencyRanking !== after.urgencyRanking) {
+    changes.push(`urgency to "${after.urgencyRanking || "-"}"`);
   }
 
-  if (changes.length === 0) {
-    return "Agent saved lead with no field changes.";
-  }
+  const hasAnyDiff =
+    JSON.stringify(before) !== JSON.stringify(after);
 
-  return `Agent updated ${changes.join(", ")}.`;
+  return { changes, hasAnyDiff };
 }
+
+
+
 
 function formatDate(value) {
   if (!value) return "";
@@ -94,58 +190,67 @@ const [status, setStatus] = useState({ type: "", message: "" });
     return () => unsub();
   }, [leadId]);
 
- async function handleAgentSave(form) {
+async function handleAgentSave(form) {
   if (!lead) return;
   setSaving(true);
-  setStatus({ type: "", message: "" });
 
   try {
     const ref = doc(db, "leads", lead.id);
 
-    // Build a summary of what changed
-    const summary = buildAgentActivitySummary(lead, form);
+    const { changes, hasAnyDiff } = buildAgentActivityChanges(lead, form);
+    const trimmedNote = form.journalEntry?.trim() || "";
+
+    let activityText = "";
+
+    if (!hasAnyDiff && !trimmedNote) {
+      activityText = "Agent saved lead with no field changes.";
+    } else {
+      if (changes.length > 0) {
+        activityText = `Agent updated ${changes.join(", ")}.`;
+      } else if (hasAnyDiff) {
+        activityText = "Agent updated lead fields.";
+      }
+
+      if (trimmedNote) {
+        activityText += (activityText ? " " : "") + `Note: "${trimmedNote}"`;
+      }
+    }
 
     const updateData = {
-      firstAttemptDate: form.firstAttemptDate || null,
-      engagementLevel: form.engagementLevel,
-      // nextEvaluationDate is admin-only now, so we skip it
+      // ❌ no firstAttemptDate
+      // ❌ no engagementLevel
+      // ❌ no nextEvaluationDate
+
       relationshipRanking: form.relationshipRanking,
       urgencyRanking: form.urgencyRanking,
-      updatedAt: serverTimestamp(),
+
       updatedBy: user.uid,
-      latestActivity: summary,
-    };
+      updatedAt: serverTimestamp(),
+      latestActivity: activityText,
+      journalLastEntry: activityText,
 
-    const trimmedNote = form.journalEntry?.trim();
-
-    if (trimmedNote && trimmedNote !== lead.journalLastEntry) {
-      updateData.journalLastEntry = trimmedNote;
-      updateData.journal = arrayUnion({
+      journal: arrayUnion({
         id: crypto.randomUUID(),
         createdAt: new Date(),
         createdBy: user.uid,
         createdByEmail: user.email,
-        text: trimmedNote,
-        type: "note",
-      });
-
-      updateData.latestActivity = `Agent added note: "${trimmedNote}"`;
-    }
+        text: activityText,
+        type: trimmedNote ? "note" : "agent-update",
+      }),
+    };
 
     await updateDoc(ref, updateData);
 
-    setStatus({ type: "success", message: "Changes saved." });
-    setTimeout(() => {
-      setStatus({ type: "", message: "" });
-    }, 3000);
+    // keep your "email admin about update?" logic here if you already added it
   } catch (err) {
-    console.error("Error updating lead:", err);
-    alert("Error updating lead. Check console for details.");
-    setStatus({ type: "error", message: "Error saving changes." });
-  } finally {
-    setSaving(false);
+    console.error("Error:", err);
+    alert("Error saving lead. Check console for details.");
   }
+
+  setSaving(false);
 }
+
+
 
   if (loading) {
     return (
@@ -253,18 +358,39 @@ const [status, setStatus] = useState({ type: "", message: "" });
           </div>
         </div>
 
-        <div>
-          <h2 className="text-xs font-semibold text-gray-700 mb-1">
-            Lead details
-          </h2>
+<div>
+  <h2 className="text-xs font-semibold text-gray-700 mb-1">
+    Lead details
+  </h2>
+  <div className="text-xs text-gray-800 space-y-0.5">
+    <div>
+      Registered:{" "}
+      {lead.registrationDate
+        ? lead.registrationDate
+        : lead.registeredDateRaw
+        ? lead.registeredDateRaw
+        : "No registration date"}
+    </div>
+    {/* <div>
+      Due date: {formatDate(lead.nextEvaluationDate) || "No due date"}
+    </div> */}
+  </div>
+
           <div className="text-xs text-gray-800 space-y-0.5">
-            <div>
+            {/* <div>
               First attempt: {formatDate(lead.firstAttemptDate) || "-"}
-            </div>
-            <div>
-              {/* 🔒 This is now purely display — still pulled from Firestore, but never changed by this page */}
-              Next evaluation: {formatDate(lead.nextEvaluationDate) || "-"}
-            </div>
+            </div> */}
+         <div>
+            
+  <span className="font-semibold text-red-700">Due date:</span>{" "}
+  <span className="text-xs text-gray-900">
+    {formatDate(lead.nextEvaluationDate) || "-"}
+  </span>
+</div>
+<p className="text-[10px] text-gray-500 mt-0.5">
+  Set by admin. This is the <span className="font-semibold">DUE DATE</span> for your next follow-up.
+</p>
+
           </div>
         </div>
 

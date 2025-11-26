@@ -1,5 +1,5 @@
 // src/components/LeadFormAdmin.jsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   STATUS_OPTIONS,
   LEAD_TYPE_OPTIONS,
@@ -17,23 +17,54 @@ const emptyForm = {
   status: "engagement",
   leadType: "buyer",
   firstAttemptDate: "",
-  engagementLevel: "attempt_1",
+  engagementLevel: "identified",
   nextEvaluationDate: "",
   relationshipRanking: "0",
   urgencyRanking: "unsure",
   source: "other",
-  assignedAgentName: "",
-  assignedAgentEmail: "",
-  journalLastEntry: "",
+   registrationDate: "",
+  journalLastEntry: "", // treated as "new note" field only
 };
 
+function normalizeDateForInput(value) {
+  if (!value) return "";
+  // Firestore Timestamp
+  if (value.toDate) {
+    const d = value.toDate();
+    return d.toISOString().slice(0, 10);
+  }
+  // ISO or yyyy-mm-dd string
+  if (typeof value === "string") return value;
+  // Fallback Date
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
+}
+
 export default function LeadFormAdmin({ initialData, onSave, saving }) {
-  const [form, setForm] = useState({
+  const [form, setForm] = useState(() => ({
     ...emptyForm,
     ...(initialData || {}),
-    firstAttemptDate: initialData?.firstAttemptDate || "",
-    nextEvaluationDate: initialData?.nextEvaluationDate || "",
-  });
+    firstAttemptDate: normalizeDateForInput(initialData?.firstAttemptDate),
+    nextEvaluationDate: normalizeDateForInput(initialData?.nextEvaluationDate),
+        registrationDate:
+      initialData?.registrationDate ||
+      initialData?.registeredDateRaw ||
+      "",
+    // 🔥 IMPORTANT: do NOT pre-fill the note with the last activity
+    journalLastEntry: "",
+  }));
+
+  // 🔁 Re-sync whenever the lead changes (e.g., after Firestore onSnapshot)
+  useEffect(() => {
+    setForm({
+      ...emptyForm,
+      ...(initialData || {}),
+      firstAttemptDate: normalizeDateForInput(initialData?.firstAttemptDate),
+      nextEvaluationDate: normalizeDateForInput(initialData?.nextEvaluationDate),
+      journalLastEntry: "",
+    });
+  }, [initialData]);
 
   function handleChange(e) {
     const { name, value } = e.target;
@@ -43,6 +74,12 @@ export default function LeadFormAdmin({ initialData, onSave, saving }) {
   async function handleSubmit(e) {
     e.preventDefault();
     await onSave(form);
+
+    // After a successful save, clear the note box so it doesn't keep re-sending
+    setForm((prev) => ({
+      ...prev,
+      journalLastEntry: "",
+    }));
   }
 
   return (
@@ -159,18 +196,24 @@ export default function LeadFormAdmin({ initialData, onSave, saving }) {
             ))}
           </select>
         </div>
-        <div>
-          <label className="block text-xs font-medium mb-1">
-            Next evaluation
-          </label>
-          <input
-            type="date"
-            name="nextEvaluationDate"
-            value={form.nextEvaluationDate || ""}
-            onChange={handleChange}
-            className="w-full border rounded-lg px-2.5 py-1.5"
-          />
-        </div>
+        
+   <div>
+  <label className="block text-xs font-semibold mb-1 text-red-700">
+    Due date
+  </label>
+  <input
+    type="date"
+    name="nextEvaluationDate"
+    value={form.nextEvaluationDate || ""}
+    onChange={handleChange}
+    className="w-full border rounded-lg px-2.5 py-1.5 border-red-400 bg-red-50"
+  />
+  <p className="mt-1 text-[10px] text-red-700">
+    This is the <span className="font-semibold">DUE DATE</span> for the next follow-up. Agents cannot change this.
+  </p>
+  
+</div>
+
       </div>
 
       {/* Rankings + source */}
@@ -225,44 +268,33 @@ export default function LeadFormAdmin({ initialData, onSave, saving }) {
           </select>
         </div>
       </div>
+<div className="grid grid-cols-3 gap-3">
+  <div>
+    <label className="block text-xs font-medium mb-1">
+      Registration date
+    </label>
+    <input
+      type="text"
+      name="registrationDate"
+      placeholder="MM/DD/YYYY"
+      value={form.registrationDate || ""}
+      onChange={handleChange}
+      className="w-full border rounded-lg px-2.5 py-1.5"
+    />
+  </div>
+</div>
 
-      {/* Assigned agent */}
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block text-xs font-medium mb-1">
-            Assigned agent name
-          </label>
-          <input
-            name="assignedAgentName"
-            value={form.assignedAgentName}
-            onChange={handleChange}
-            className="w-full border rounded-lg px-2.5 py-1.5"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium mb-1">
-            Assigned agent email
-          </label>
-          <input
-            name="assignedAgentEmail"
-            value={form.assignedAgentEmail}
-            onChange={handleChange}
-            className="w-full border rounded-lg px-2.5 py-1.5"
-          />
-        </div>
-      </div>
-
-      {/* Journal seed */}
+      {/* Journal seed (NEW note only, not "last entry" mirror) */}
       <div>
         <label className="block text-xs font-medium mb-1">
-          Journal (initial note)
+          Journal (new note for this save)
         </label>
         <textarea
           name="journalLastEntry"
           value={form.journalLastEntry}
           onChange={handleChange}
           className="w-full border rounded-lg px-2.5 py-1.5 min-h-[70px]"
-          placeholder="Optional first note about this lead..."
+          placeholder="Optional note about this update..."
         />
       </div>
 

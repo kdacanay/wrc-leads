@@ -16,15 +16,13 @@ export const LEAD_TYPE_OPTIONS = [
 ];
 
 export const ENGAGEMENT_LEVEL_OPTIONS = [
-  { value: "attempt_1", label: "1st Attempt" },
-  { value: "attempt_2", label: "2nd Attempt" },
-  { value: "attempt_3", label: "3rd Attempt" },
-  { value: "attempt_4", label: "4th Attempt" },
-  { value: "attempt_5", label: "5th Attempt" },
-  { value: "contact", label: "Contact" },
-  { value: "meeting", label: "Meeting" },
-  { value: "appointment", label: "Appointment" },
+  { value: "identified",        label: "Identified" },
+  { value: "contacted",         label: "Contacted" },
+  { value: "meeting_scheduled", label: "Meeting scheduled" },
+  { value: "meeting_completed", label: "Meeting completed" },
+  { value: "in_pipeline",       label: "In pipeline" },
 ];
+
 
 export const RELATIONSHIP_RANK_OPTIONS = [
     {value: "0", label: "0% or new lead" },

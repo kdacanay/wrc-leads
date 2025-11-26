@@ -1,28 +1,36 @@
 // src/components/JournalTimeline.jsx
 import React from "react";
 
-function formatDateTime(value) {
+function formatEntryDate(value) {
   if (!value) return "";
-  let d;
-  // Firestore Timestamp
   if (value.toDate) {
-    d = value.toDate();
-  } else if (value instanceof Date) {
-    d = value;
-  } else {
-    // fall back
-    d = new Date(value);
+    const d = value.toDate();
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   }
-
+  const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "";
-
-  const date = d.toLocaleDateString();
-  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return `${date} ${time}`;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
-export default function JournalTimeline({ entries }) {
-  if (!entries || entries.length === 0) {
+export default function JournalTimeline({ entries, onDeleteEntry }) {
+  const safeEntries = Array.isArray(entries) ? entries : [];
+
+  // 🔹 Hide soft-deleted entries
+  const visible = safeEntries.filter((e) => !e?.isDeleted);
+
+  if (!visible.length) {
     return (
       <div className="text-xs text-gray-500 italic">
         No journal entries yet.
@@ -30,37 +38,63 @@ export default function JournalTimeline({ entries }) {
     );
   }
 
-  // newest first
-  const ordered = [...entries].sort((a, b) => {
-    const da = a.createdAt?.toMillis
+  const sorted = [...visible].sort((a, b) => {
+    const ta = a?.createdAt?.toMillis
       ? a.createdAt.toMillis()
-      : new Date(a.createdAt).getTime();
-    const db = b.createdAt?.toMillis
+      : a?.createdAt
+      ? new Date(a.createdAt).getTime()
+      : 0;
+    const tb = b?.createdAt?.toMillis
       ? b.createdAt.toMillis()
-      : new Date(b.createdAt).getTime();
-    return db - da;
+      : b?.createdAt
+      ? new Date(b.createdAt).getTime()
+      : 0;
+    return tb - ta; // newest first
   });
 
   return (
-    <ul className="space-y-3 text-xs">
-      {ordered.map((entry) => (
-        <li
-          key={entry.id}
-          className="border border-gray-200 rounded-lg p-2.5 bg-gray-50"
+    <div className="space-y-3">
+      {sorted.map((entry) => (
+        <div
+          key={entry.id || `${entry.createdAt}-${entry.text}`}
+          className="border border-gray-200 rounded-lg p-3 text-xs bg-gray-50 flex flex-col gap-1"
         >
-          <div className="flex justify-between items-center mb-1.5">
-            <span className="font-medium">
-              {entry.createdByEmail || "Unknown"}
-            </span>
-            <span className="text-[11px] text-gray-500">
-              {formatDateTime(entry.createdAt)}
-            </span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11px] text-gray-600">
+              {formatEntryDate(entry.createdAt) || "Unknown time"}
+            </div>
+            <div className="flex items-center gap-2">
+              {entry.type && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-200 text-[10px] text-gray-700">
+                  {entry.type}
+                </span>
+              )}
+
+              {/* 🔥 Delete button only when onDeleteEntry is provided */}
+              {onDeleteEntry && entry.id && (
+                <button
+                  type="button"
+                  onClick={() => onDeleteEntry(entry.id)}
+                  className="text-[10px] px-2 py-0.5 rounded-full border border-red-300 text-red-600 hover:bg-red-50"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
           </div>
-          <div className="whitespace-pre-wrap text-gray-800">
+
+          {entry.createdByEmail && (
+            <div className="text-[11px] text-gray-500">
+              By: {entry.createdByEmail}
+            </div>
+          )}
+
+          <div className="text-[13px] text-gray-800 whitespace-pre-line">
             {entry.text}
           </div>
-        </li>
+        </div>
       ))}
-    </ul>
+    </div>
   );
 }
+
