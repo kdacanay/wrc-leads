@@ -1,236 +1,370 @@
 // src/pages/AgentLeadPage.jsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { db } from "../firebase";
+
 import {
   doc,
   onSnapshot,
   updateDoc,
   serverTimestamp,
-  arrayUnion,
+  collection,
+  query,
+  orderBy,
+  addDoc,
 } from "firebase/firestore";
+
 import LeadFormAgent from "../components/LeadFormAgent";
 import JournalTimeline from "../components/JournalTimeline";
 
-const ADMIN_ALERT_EMAIL =
-  import.meta.env.VITE_ADMIN_ALERT_EMAIL || "admin@example.com";
-
-function emailAdminAboutLeadUpdate(
-  lead,
-  activityText,
-  agentUser,
-  adminEmail = ADMIN_ALERT_EMAIL
-) {
-  if (!adminEmail) return;
-
-  const url = `${window.location.origin}/admin/lead/${lead.id}`;
-  const subject = `Lead updated by ${agentUser?.email || "agent"}: ${(
-    (lead.firstName || "") +
-    " " +
-    (lead.lastName || "")
-  ).trim()}`.trim();
-
-  const bodyLines = [
-    `Hi,`,
-    "",
-    `An agent has updated a lead in the WRC Lead Dashboard.`,
-    "",
-    `Agent: ${agentUser?.email || "(unknown agent)"}`,
-    `Lead: ${((lead.firstName || "") + " " + (lead.lastName || "")).trim()} (ID: ${lead.id})`,
-    "",
-    `Summary of latest activity:`,
-    activityText || "(no summary available)",
-    "",
-    `View the lead in your admin dashboard:`,
-    url,
-    "",
-    "Thank you.",
-  ];
-
-  const mailto = `mailto:${encodeURIComponent(
-    adminEmail
-  )}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(
-    bodyLines.join("\n")
-  )}`;
-
-  window.location.href = mailto;
-}
-
-function buildAgentActivityChanges(oldLead, form) {
-  const changes = [];
-
-  const before = {
-    relationshipRanking: oldLead.relationshipRanking || "",
-    urgencyRanking: oldLead.urgencyRanking || "",
-  };
-
-  const after = {
-    relationshipRanking: form.relationshipRanking || "",
-    urgencyRanking: form.urgencyRanking || "",
-  };
-
-  if (before.relationshipRanking !== after.relationshipRanking) {
-    changes.push(`relationship to "${after.relationshipRanking || "-"}"`);
-  }
-  if (before.urgencyRanking !== after.urgencyRanking) {
-    changes.push(`urgency to "${after.urgencyRanking || "-"}"`);
-  }
-
-  const hasAnyDiff = JSON.stringify(before) !== JSON.stringify(after);
-  return { changes, hasAnyDiff };
-}
-
+// ---------- Small helpers ----------
 function formatDate(value) {
   if (!value) return "";
-  if (value.toDate) {
-    const d = value.toDate();
-    return d.toISOString().split("T")[0];
-  }
-  return value;
+  if (value?.toDate) return value.toDate().toISOString().split("T")[0];
+  if (value instanceof Date) return value.toISOString().split("T")[0];
+  return String(value);
 }
 
-function isActionItemJournalEntry(entry) {
-  const type = String(entry?.type || "").toLowerCase().trim();
-  const text = String(entry?.text || "").toLowerCase().trim();
+function toMillis(val) {
+  if (!val) return 0;
+  if (val?.toMillis) return val.toMillis();
+  if (val instanceof Date) return val.getTime();
+  if (typeof val === "number") return val;
+  const t = new Date(val).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
 
-  // Hide action item updates even if older entries were written with a weird type
-  if (type === "action-item") return true;
+function formatDateTime(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
+function Card({ title, children, right }) {
   return (
-    text.startsWith("admin updated action item") ||
-    text.startsWith("admin cleared action item") ||
-    text.includes("updated action item") ||
-    text.includes("cleared action item")
+    <div className="border border-gray-200 rounded-xl bg-white p-4">
+      {(title || right) && (
+        <div className="flex items-center justify-between mb-2">
+          {title ? (
+            <h2 className="text-sm font-semibold text-gray-900">{title}</h2>
+          ) : (
+            <div />
+          )}
+          {right ? <div>{right}</div> : null}
+        </div>
+      )}
+      {children}
+    </div>
   );
 }
 
-function getLatestNonActionItemText(lead, filteredJournal) {
-  let latestText = "";
-  let latestTime = 0;
-
-  // Use filtered journal so action item updates can't become "Latest activity"
-  if (Array.isArray(filteredJournal) && filteredJournal.length > 0) {
-    for (const entry of filteredJournal) {
-      if (!entry?.text) continue;
-
-      const ca = entry.createdAt;
-      const t = ca?.toMillis
-        ? ca.toMillis()
-        : ca instanceof Date
-        ? ca.getTime()
-        : typeof ca === "string"
-        ? new Date(ca).getTime()
-        : typeof ca === "number"
-        ? ca
-        : 0;
-
-      if (!Number.isNaN(t) && t >= latestTime) {
-        latestTime = t;
-        latestText = entry.text;
-      }
-    }
-  }
-
-  // fallback (these might still be action-item-ish, but the above protects most cases)
-  if (!latestText && lead.journalLastEntry) latestText = lead.journalLastEntry;
-  if (!latestText && lead.latestActivity) latestText = lead.latestActivity;
-
-  return latestText;
+function Callout({ tone = "blue", title, children }) {
+  const tones = {
+    blue: "border-blue-300 bg-blue-50 text-blue-900",
+    amber: "border-amber-300 bg-amber-50 text-amber-900",
+    gray: "border-gray-200 bg-gray-50 text-gray-800",
+  };
+  return (
+    <div className={`border-l-4 rounded-xl p-4 ${tones[tone] || tones.gray}`}>
+      {title ? <div className="text-xs font-semibold mb-1">{title}</div> : null}
+      <div className="text-xs whitespace-pre-wrap">{children}</div>
+    </div>
+  );
 }
 
+// ---------- Page ----------
 export default function AgentLeadPage() {
   const { leadId } = useParams();
+  const decodedLeadId = useMemo(
+    () => decodeURIComponent(leadId || ""),
+    [leadId]
+  );
+
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, role } = useAuth();
 
   const [lead, setLead] = useState(null);
+  const [agentJournal, setAgentJournal] = useState([]);
   const [loading, setLoading] = useState(true);
+
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
   const [status, setStatus] = useState({ type: "", message: "" });
+  const [unauthorized, setUnauthorized] = useState(false);
 
+  // ✅ If role is known and not agent, get out immediately
   useEffect(() => {
-    if (!leadId) return;
+    if (!user?.uid) return;
+    if (!role) return; // wait until role is loaded
+    if (role === "admin") navigate("/admin", { replace: true });
+    else if (role !== "agent") navigate("/", { replace: true });
+  }, [role, user?.uid, navigate]);
 
-    const ref = doc(db, "leads", leadId);
+  // 1) Load lead doc + enforce access (only assigned agent)
+  useEffect(() => {
+    if (!decodedLeadId) return;
+    if (!user?.uid) return;
+    if (!role) return;
+    if (role !== "agent") return;
+
+    setLoading(true);
+    setUnauthorized(false);
+
+    const ref = doc(db, "leads", decodedLeadId);
+
     const unsub = onSnapshot(
       ref,
       (snap) => {
         if (!snap.exists()) {
-          setError("Lead not found.");
           setLead(null);
-        } else {
-          setLead({ id: snap.id, ...snap.data() });
-          setError("");
+          setUnauthorized(false);
+          setLoading(false);
+          return;
         }
+
+        const docId = snap.id; // ✅ always the Firestore doc id
+        const data = snap.data() || {};
+
+        // ✅ keep both:
+        const leadObj = { ...data, docId }; // docId for writes
+
+        const myUid = user.uid;
+        const myEmail = (user.email || "").toLowerCase();
+
+        const assignedUid = String(leadObj.assignedAgentId || "");
+        const assignedEmailNorm = String(
+          leadObj.assignedAgentEmailNorm || leadObj.assignedAgentEmail || ""
+        ).toLowerCase();
+
+        const isAssigned =
+          (assignedUid && assignedUid === myUid) ||
+          (!assignedUid &&
+            assignedEmailNorm &&
+            myEmail &&
+            assignedEmailNorm === myEmail);
+
+        if (!isAssigned) {
+          setLead(null);
+          setUnauthorized(true);
+          setLoading(false);
+          return;
+        }
+
+        setUnauthorized(false);
+        setLead(leadObj);
         setLoading(false);
       },
       (err) => {
         console.error("Error loading lead:", err);
-        setError("Error loading lead.");
+        setLead(null);
         setLoading(false);
+        setUnauthorized(err?.code === "permission-denied");
       }
     );
 
     return () => unsub();
-  }, [leadId]);
+  }, [decodedLeadId, user?.uid, user?.email, role]);
 
-  // ✅ Filter out action-item journal entries for AGENT view
-  const agentJournal = Array.isArray(lead?.journal)
-    ? lead.journal.filter((e) => !isActionItemJournalEntry(e))
-    : [];
+  // 2) Load journal entries agent is allowed to see (shared + agent)
+  // NOTE: this assumes your rules allow visibility "shared" OR "agent" for assigned agents.
+  useEffect(() => {
+    if (!decodedLeadId) return;
+    if (!user?.uid) return;
+    if (!role) return;
+    if (role !== "agent") return;
 
-  const latestActivityText = lead ? getLatestNonActionItemText(lead, agentJournal) : "";
+    // ✅ No where() so we don't require a composite index.
+    // We’ll filter visibility client-side.
+    const q = query(
+      collection(db, "leads", decodedLeadId, "journal"),
+      orderBy("createdAt", "desc")
+    );
+
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+        // ✅ Agent can see:
+        // - visibility: "shared"
+        // - visibility: "agent"
+        // - older docs that don't have visibility set (treat as shared)
+        const visible = rows.filter((r) => {
+          const vis = String(r.visibility || "shared").toLowerCase();
+          return vis === "shared" || vis === "agent"; // ✅ admin-only entries won't show
+
+        });
+
+        setAgentJournal(visible);
+      },
+      (err) => console.error("Agent journal listener error:", err)
+    );
+
+    return () => unsub();
+  }, [decodedLeadId, user?.uid, role]);
+
+  const latestAgentJournalText = useMemo(() => {
+    if (!agentJournal?.length) return "";
+    return agentJournal[0]?.text || "";
+  }, [agentJournal]);
 
   async function handleAgentSave(form) {
     if (!lead) return;
+    if (unauthorized) return;
+
+    if (!user?.uid) {
+      setStatus({
+        type: "error",
+        message: "You must be signed in to save changes.",
+      });
+      return;
+    }
+
     setSaving(true);
     setStatus({ type: "", message: "" });
 
     try {
-      const ref = doc(db, "leads", lead.id);
+      const trimmedNote = (form.journalEntry || "").trim();
+      
 
-      const { changes, hasAnyDiff } = buildAgentActivityChanges(lead, form);
-      const trimmedNote = form.journalEntry?.trim() || "";
+      // Build an activity line
+      const parts = [];
+      if (
+        form.relationshipRanking &&
+        form.relationshipRanking !== lead.relationshipRanking
+      ) {
+        parts.push(`Relationship: ${form.relationshipRanking}`);
+      }
+      if (form.urgencyRanking && form.urgencyRanking !== lead.urgencyRanking) {
+        parts.push(`Urgency: ${form.urgencyRanking}`);
+      }
+// ✅ Rejection request fields (define BEFORE using turningOnNow/reason)
+const requestingReject = !!form.requestReject;
+const reason = (form.rejectionReason || "").trim();
 
-      let activityText = "";
+// Require a reason if requesting reject
+if (requestingReject && !reason) {
+  setStatus({ type: "error", message: "Please add a reason to request rejection." });
+  setSaving(false);
+  return;
+}
 
-      if (!hasAnyDiff && !trimmedNote) {
-        activityText = "Agent saved lead with no field changes.";
-      } else {
-        if (changes.length > 0) {
-          activityText = `Agent updated ${changes.join(", ")}.`;
-        } else if (hasAnyDiff) {
-          activityText = "Agent updated lead fields.";
-        }
+// Determine if agent is turning it ON now
+const wasRequested = !!lead.rejectionRequested;
+const turningOnNow = requestingReject && !wasRequested;
 
-        if (trimmedNote) {
-          activityText += (activityText ? " " : "") + `Note: "${trimmedNote}"`;
-        }
+      
+if (form.status && form.status !== lead.status) {
+  parts.push(`Status: ${form.status}`);
+}
+      const activityFromFields =
+        parts.length > 0
+          ? `Agent updated — ${parts.join(" • ")}`
+          : "Agent updated lead.";
+
+ // ✅ NOW it’s safe to use turningOnNow + reason
+const activityText = turningOnNow
+  ? `🚫 Rejection requested: ${reason}`
+  : trimmedNote
+  ? `Agent note: ${trimmedNote}`
+  : activityFromFields;
+
+
+
+await updateDoc(doc(db, "leads", lead.docId), {
+  status: form.status || lead.status || "",
+  relationshipRanking: form.relationshipRanking || "",
+  urgencyRanking: form.urgencyRanking || "",
+
+  // ✅ rejection request fields
+  rejectionRequested: requestingReject,
+  rejectionReason: requestingReject ? reason : "",
+
+  ...(turningOnNow
+    ? {
+        rejectionStatus: "pending",
+        rejectionRequestedAt: serverTimestamp(),
+        rejectionRequestedBy: user.uid,
+      }
+    : {}),
+
+  updatedBy: user.uid,
+  updatedAt: serverTimestamp(),
+  latestActivity: activityText,
+  latestActivityAt: serverTimestamp(),
+  journalLastEntry: activityText,
+
+});
+
+// ✅ If agent just requested rejection, notify admin clearly
+if (turningOnNow) {
+  const leadName =
+    `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || "(No name)";
+
+  const msg = `🚫 Rejection requested by ${user.displayName || user.email || "Agent"}: ${reason}`;
+
+  // 1) Add a shared journal entry so it’s visible to admin + agent
+  await addDoc(collection(db, "leads", lead.docId, "journal"), {
+    text: msg,
+    createdAt: serverTimestamp(),
+    createdBy: user.uid,
+    createdByEmail: user.email || "",
+    createdByRole: "agent",
+    visibility: "shared",
+    type: "rejection-request",
+  });
+
+  // 2) Add an admin notification (shows on AdminDashboard)
+  await addDoc(collection(db, "adminNotifications"), {
+    type: "rejection-request",
+    leadId: lead.docId,
+    leadName,
+    latestActivity: msg,
+    rejectionReason: reason,
+    updatedBy: user.uid,
+    updatedByName: user.displayName || user.email || "Agent",
+    isRead: false,
+    createdAt: serverTimestamp(),
+  });
+}
+
+
+      // 2) Add journal entry
+      if (trimmedNote) {
+      await addDoc(collection(db, "leads", lead.docId, "journal"), {
+  text: trimmedNote,
+  createdAt: serverTimestamp(),
+  createdBy: user.uid,
+  createdByEmail: user.email || "",
+  visibility: "shared", // or "agent"
+  type: "agent-note",
+});
       }
 
-      await updateDoc(ref, {
-        relationshipRanking: form.relationshipRanking,
-        urgencyRanking: form.urgencyRanking,
+      // 3) Create admin notification
+// 3) Create admin notification
+// ✅ If it's a new rejection request, we already sent a special notification above.
+if (!turningOnNow) {
+  const leadName =
+    `${lead.firstName || ""} ${lead.lastName || ""}`.trim() || "(No name)";
 
-        updatedBy: user.uid,
-        updatedAt: serverTimestamp(),
-        latestActivity: activityText,
-        journalLastEntry: activityText,
+  await addDoc(collection(db, "adminNotifications"), {
+    leadId: lead.docId,
+    leadName,
+    latestActivity: activityText,
+    updatedBy: user.uid,
+    updatedByName: user.displayName || user.email || "Agent",
+    isRead: false,
+    createdAt: serverTimestamp(),
+  });
+}
 
-        journal: arrayUnion({
-          id: crypto.randomUUID(),
-          createdAt: new Date(),
-          createdBy: user.uid,
-          createdByEmail: user.email,
-          text: activityText,
-          type: trimmedNote ? "note" : "agent-update",
-        }),
-      });
-
-      // Optional: email admin on update (if you want it)
-      // emailAdminAboutLeadUpdate(lead, activityText, user);
 
       setStatus({ type: "success", message: "Saved!" });
       setTimeout(() => setStatus({ type: "", message: "" }), 2000);
@@ -242,31 +376,73 @@ export default function AgentLeadPage() {
     }
   }
 
+  // ---------- Render ----------
+  if (!role) {
+    return <div className="text-sm text-gray-600">Loading...</div>;
+  }
+
   if (loading) {
     return <div className="text-sm text-gray-600">Loading lead details...</div>;
   }
 
-  if (error || !lead) {
+  if (!lead) {
     return (
-      <div className="text-sm text-red-600">{error || "Lead not found."}</div>
+      <div className="text-sm text-red-600">
+        {unauthorized
+          ? "You don’t have access to this lead."
+          : "Lead not found or you don’t have access."}
+      </div>
     );
   }
 
   return (
-    <div className="space-y-5 text-sm">
-      <div>
+    <div className="space-y-6 text-sm">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-gray-900">
+            {lead.firstName} {lead.lastName}
+          </h1>
+          <p className="text-xs text-gray-500">
+            Lead ID:{" "}
+            <span className="font-mono bg-gray-100 px-1.5 py-0.5 rounded">
+              {lead.id}
+            </span>
+          </p>
+
+          <p className="text-xs text-gray-500 mt-1">
+            Assigned agent:{" "}
+            {lead.assignedAgentName ? (
+              <>
+                <span className="font-medium text-gray-800">
+                  {lead.assignedAgentName}
+                </span>
+                {lead.assignedAgentEmail ? (
+                  <span className="text-gray-500">
+                    {" "}
+                    · {lead.assignedAgentEmail}
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="italic text-gray-400">Unassigned</span>
+            )}
+          </p>
+        </div>
+
         <button
           type="button"
           onClick={() => navigate("/agent")}
-          className="inline-flex items-center text-xs text-gray-600 hover:text-gray-900 hover:underline mb-2"
+          className="text-xs px-3 py-1.5 rounded-full border border-gray-300 text-gray-700 hover:bg-gray-50"
         >
           ← Back to My Leads
         </button>
       </div>
 
-      {status.message && (
+      {/* Status banner */}
+      {status.message ? (
         <div
-          className={`text-xs px-3 py-2 rounded border ${
+          className={`text-xs px-3 py-2 rounded-lg border ${
             status.type === "success"
               ? "border-green-200 bg-green-50 text-green-700"
               : "border-red-200 bg-red-50 text-red-700"
@@ -274,140 +450,130 @@ export default function AgentLeadPage() {
         >
           {status.message}
         </div>
-      )}
+      ) : null}
 
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">
-            {lead.firstName} {lead.lastName}
-          </h1>
-          <p className="text-xs text-gray-600">
-            Lead ID:{" "}
-            <span className="font-mono text-[11px] bg-gray-100 px-1.5 py-0.5 rounded">
-              {lead.id}
-            </span>
-          </p>
-          <p className="text-xs text-gray-600 mt-1">
-            Assigned agent:{" "}
-            {lead.assignedAgentName ? (
-              <>
-                <span className="font-medium">{lead.assignedAgentName}</span>
-                {lead.assignedAgentEmail && (
-                  <> &middot; {lead.assignedAgentEmail}</>
-                )}
-              </>
-            ) : (
-              <span className="italic text-gray-400">Unassigned</span>
-            )}
-          </p>
-        </div>
+      {/* Admin-controlled callouts */}
+      <div className="space-y-3">
+        {lead.propertyAddress?.trim() ? (
+          <Callout tone="blue" title="Property Address (set by admin)">
+            {lead.propertyAddress}
+          </Callout>
+        ) : null}
+
+        {lead.actionItem?.trim() ? (
+          <Callout tone="amber" title="Next Action Item (from admin)">
+            {lead.actionItem}
+          </Callout>
+        ) : (
+          <Callout tone="gray" title="Next Action Item (from admin)">
+            No action item yet.
+          </Callout>
+        )}
       </div>
 
-      {/* Property address banner (admin-controlled, visible to agent) */}
-      {lead.propertyAddress?.trim() && (
-        <div className="border-l-4 border-blue-400 bg-blue-50 p-3 rounded-md text-xs">
-          <div className="font-semibold text-blue-800">
-            Property Address (set by admin)
-          </div>
-          <div className="mt-1 text-blue-900 whitespace-pre-line">
-            {lead.propertyAddress}
-          </div>
-        </div>
-      )}
+      {/* Main layout */}
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* LEFT */}
+        <div className="lg:col-span-2 space-y-6">
+          <Card
+            title="Update This Lead"
+            right={
+              <span className="text-[11px] text-gray-500">
+                Only approved fields save.
+              </span>
+            }
+          >
+            <LeadFormAgent lead={lead} onSave={handleAgentSave} saving={saving} />
+          </Card>
 
-      {/* Admin action item banner stays visible */}
-      {lead.actionItem && (
-        <div className="border-l-4 border-amber-400 bg-amber-50 p-3 rounded-md text-xs">
-          <div className="font-semibold text-amber-800">Admin action item</div>
-          <div className="mt-1 text-amber-900 whitespace-pre-line">
-            {lead.actionItem}
-          </div>
-        </div>
-      )}
-
-      <div className="grid md:grid-cols-3 gap-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
-        <div>
-          <h2 className="text-xs font-semibold text-gray-700 mb-1">Contact</h2>
-          <div className="text-xs text-gray-800 space-y-0.5">
-            {lead.phone && <div>📞 {lead.phone}</div>}
-            {lead.email && (
-              <div>
-                ✉️{" "}
-                <a
-                  href={`mailto:${lead.email}`}
-                  className="text-blue-700 hover:underline"
-                >
-                  {lead.email}
-                </a>
-              </div>
+          <Card
+            title="Journal"
+            right={
+              <span className="text-[11px] text-gray-500">
+                Shows shared notes from admin + your notes.
+              </span>
+            }
+          >
+            {agentJournal.length === 0 ? (
+              <div className="text-xs text-gray-500">No journal entries yet.</div>
+            ) : (
+              <JournalTimeline entries={agentJournal} />
             )}
-          </div>
+          </Card>
         </div>
 
-        <div>
-          <h2 className="text-xs font-semibold text-gray-700 mb-1">
-            Lead details
-          </h2>
-          <div className="text-xs text-gray-800 space-y-0.5">
-            <div>
-              Registered:{" "}
-              {lead.registrationDate
-                ? lead.registrationDate
-                : lead.registeredDateRaw
-                ? lead.registeredDateRaw
-                : "No registration date"}
-            </div>
-
-            {/* Property address also visible here */}
-            <div className="mt-1">
-              <span className="font-semibold text-gray-700">Property:</span>{" "}
-              {lead.propertyAddress?.trim() ? (
-                <span className="text-gray-900">{lead.propertyAddress}</span>
+        {/* RIGHT */}
+        <div className="space-y-6">
+          <Card title="Contact">
+            <div className="text-xs text-gray-800 space-y-1">
+              {lead.phone ? (
+                <div>📞 {lead.phone}</div>
               ) : (
-                <span className="italic text-gray-400">Not provided yet</span>
+                <div className="text-gray-400 italic">No phone on file.</div>
+              )}
+              {lead.email ? (
+                <div>
+                  ✉️{" "}
+                  <a
+                    href={`mailto:${lead.email}`}
+                    className="text-blue-700 hover:underline"
+                  >
+                    {lead.email}
+                  </a>
+                </div>
+              ) : (
+                <div className="text-gray-400 italic">No email on file.</div>
               )}
             </div>
+          </Card>
 
-            <div className="mt-1">
-              <span className="font-semibold text-red-700">Due date:</span>{" "}
-              <span className="text-xs text-gray-900">
-                {formatDate(lead.nextEvaluationDate) || "-"}
-              </span>
+          <Card title="Dates">
+            <div className="text-xs text-gray-800 space-y-2">
+              <div>
+                <div className="text-[11px] text-gray-500">Registered</div>
+                <div className="text-gray-900">
+                  {lead.registrationDate
+                    ? formatDate(lead.registrationDate)
+                    : lead.registeredDateRaw
+                    ? formatDate(lead.registeredDateRaw)
+                    : "—"}
+                </div>
+              </div>
+
+              <div>
+                <div className="text-[11px] text-gray-500">
+                  Due Date (set by admin)
+                </div>
+                <div className="text-gray-900">
+                  {formatDate(lead.nextEvaluationDate) || "—"}
+                </div>
+                <div className="text-[10px] text-gray-500 mt-0.5">
+                  This is your next follow-up deadline.
+                </div>
+              </div>
             </div>
-            <p className="text-[10px] text-gray-500 mt-0.5">
-              Set by admin. This is the{" "}
-              <span className="font-semibold">DUE DATE</span> for your next
-              follow-up.
-            </p>
-          </div>
-        </div>
+          </Card>
 
-        <div>
-          <h2 className="text-xs font-semibold text-gray-700 mb-1">
-            Latest activity
-          </h2>
-          <div className="text-xs text-gray-800 space-y-0.5">
-            {latestActivityText ? (
-              <span className="text-gray-700">{latestActivityText}</span>
-            ) : (
-              <span className="text-gray-400 italic">No recent activity.</span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-6">
-        <div>
-          <h2 className="text-sm font-semibold text-gray-900 mb-2">
-            Update this lead
-          </h2>
-          <LeadFormAgent lead={lead} onSave={handleAgentSave} saving={saving} />
-        </div>
-
-        <div>
-          <h2 className="text-sm font-semibold text-gray-900 mb-2">Journal</h2>
-          {/* ✅ Agents see journal WITHOUT action-item entries */}
-          <JournalTimeline entries={agentJournal} />
+          <Card title="Latest Journal Note (yours)">
+            <div className="text-xs text-gray-800">
+              {latestAgentJournalText ? (
+                <>
+                  <div className="text-gray-700 whitespace-pre-wrap">
+                    {latestAgentJournalText}
+                  </div>
+                  <div className="mt-1 text-[10px] text-gray-500">
+                    {agentJournal[0]?.createdAt
+                      ? formatDateTime(toMillis(agentJournal[0].createdAt))
+                      : ""}
+                  </div>
+                </>
+              ) : (
+                <span className="text-gray-400 italic">
+                  No journal entries yet.
+                </span>
+              )}
+            </div>
+          </Card>
         </div>
       </div>
     </div>

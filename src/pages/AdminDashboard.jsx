@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState, useRef } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { db, deleteUserByUid } from "../firebase";
@@ -8,6 +7,7 @@ import {
   addDoc,
   getDoc,
   getDocs,
+  setDoc,
   serverTimestamp,
   query,
   orderBy,
@@ -33,8 +33,281 @@ import useAssignableAgents from "../hooks/useAssignableAgents";
 import { Link, useNavigate } from "react-router-dom";
 // import { normName, normEmail } from "../utils/normalize";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { importVleadsXlsx } from "../utils/importVleadsXlsx";
+
+
+function normEmailLocal(v) {
+  return String(v || "").trim().toLowerCase();
+}
+
+function normPhoneLocal(v) {
+  return String(v || "").replace(/[^\d]/g, "");
+}
+
+function buildLeadId({ email, phone }) {
+  const e = normEmailLocal(email);
+  if (e) return `email_${e}`;
+  const p = normPhoneLocal(phone);
+  if (p) return `phone_${p}`;
+  return null;
+}
+
+function shallowDiff(oldObj, nextObj, fields) {
+  const changed = [];
+  for (const f of fields) {
+    const a = oldObj?.[f] ?? "";
+    const b = nextObj?.[f] ?? "";
+    // normalize strings a bit
+    const aa = typeof a === "string" ? a.trim() : a;
+    const bb = typeof b === "string" ? b.trim() : b;
+    if (JSON.stringify(aa) !== JSON.stringify(bb)) changed.push(f);
+  }
+  return changed;
+}
+
+function toMillis(value) {
+  if (!value) return 0;
+  if (value?.toMillis) return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  const t = new Date(value).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function formatDT(ms) {
+  if (!ms) return "";
+  return new Date(ms).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+// import React from "react";
+// import { importVleadsXlsx } from "../utils/importVleadsXlsx"; // <-- adjust path if needed
+// const [showUnreadOnly, setShowUnreadOnly] = useState(true);
+
+// const visibleNotifications = React.useMemo(() => {
+//   return showUnreadOnly
+//     ? notifications.filter((n) => !n.isRead)
+//     : notifications;
+// }, [notifications, showUnreadOnly]);
+
+function VleadsImportButton({ actor }) {
+  const inputRef = React.useRef(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const handlePick = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setBusy(true);
+      const res = await importVleadsXlsx(file, actor);
+      console.log("[vleads] import result:", res);
+      alert(`Imported ${res.imported} vleads.`);
+    } catch (err) {
+      console.error("[vleads] import failed:", err);
+      alert(err.message || "Import failed");
+    } finally {
+      setBusy(false);
+      e.target.value = "";
+    }
+  };
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".xlsx,.xls"
+        onChange={handlePick}
+        style={{ display: "none" }}
+      />
+
+      <button
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        disabled={busy}
+        className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+      >
+        {busy ? "Importing..." : "Import vleads (Excel)"}
+      </button>
+    </>
+  );
+}
+
+
+
+async function buildAgentDigestEmailAsync({ agentName, agentEmail, leads, sinceMs }) {
+  const safeName = agentName || agentEmail || "Agent";
+
+  // IMPORTANT: localhost links in dev will show in email.
+  // Prefer a real base URL for production.
+  const baseUrl =
+    import.meta?.env?.VITE_PUBLIC_BASE_URL ||
+    window.location.origin;
+
+  const formatDT = (ms) => {
+    try {
+      return new Date(ms).toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return "";
+    }
+  };
+
+  const getMs = (v) => {
+    if (!v) return 0;
+    if (typeof v === "number") return v;
+    if (v?.toMillis) return v.toMillis();
+    if (v instanceof Date) return v.getTime();
+    if (typeof v === "string") {
+      const t = Date.parse(v);
+      return Number.isNaN(t) ? 0 : t;
+    }
+    return 0;
+  };
+
+  // Choose the best "last activity time" we have
+  const lastActivityMs = (l) => {
+    // Prefer explicit timestamps if you have them
+    const candidates = [
+      getMs(l.latestActivityAt),
+      getMs(l.updatedAt),
+      getMs(l.createdAt),
+      // If you store journalLastAt / journalLastEntryAt, include it here too:
+      getMs(l.journalLastAt),
+      getMs(l.journalLastEntryAt),
+    ];
+    return Math.max(...candidates.filter(Boolean), 0);
+  };
+
+  const normalized = (Array.isArray(leads) ? leads : [])
+    .filter(Boolean)
+    .map((l) => ({
+      ...l,
+      _lastMs: lastActivityMs(l),
+    }))
+    .sort((a, b) => (b._lastMs || 0) - (a._lastMs || 0));
+
+  const updated = sinceMs
+    ? normalized.filter((l) => (l._lastMs || 0) >= sinceMs)
+    : [];
+
+  const stale = sinceMs
+    ? normalized.filter((l) => (l._lastMs || 0) < sinceMs)
+    : normalized;
+
+  const subject = `WRC Leads Digest — ${safeName} — ${new Date().toLocaleDateString()}`;
+
+  const lines = [];
+  lines.push(`Hi ${safeName},`);
+  lines.push("");
+  lines.push(
+    sinceMs
+      ? `Here are your assigned leads (recent updates since ${formatDT(sinceMs)} are listed first):`
+      : `Here are your assigned leads:`
+  );
+  lines.push("");
+
+  if (normalized.length === 0) {
+    lines.push("No leads are currently assigned to you.");
+    lines.push("");
+  } else {
+    // Section 1: Updated
+    if (updated.length > 0) {
+      lines.push("RECENTLY UPDATED");
+      lines.push("---------------");
+      for (const l of updated) {
+        const name = `${l.firstName || ""} ${l.lastName || ""}`.trim() || "(No name)";
+        const summary =
+          l.latestActivityAdmin ||
+          l.latestActivity ||
+          l.journalLastEntryAdmin ||
+          l.journalLastEntry ||
+          "Updated";
+
+        const leadUrl = `${baseUrl}/agent-view/${encodeURIComponent(l.id)}`;
+        lines.push(`• ${name} — ${formatDT(l._lastMs)}`);
+        lines.push(`  ${summary}`);
+        lines.push(`  Open: ${leadUrl}`);
+        lines.push("");
+      }
+    }
+
+    // Section 2: Still assigned but not updated recently
+    if (stale.length > 0) {
+      lines.push(updated.length > 0 ? "OLDER / NO RECENT UPDATES" : "ALL ASSIGNED LEADS");
+      lines.push("-----------------------");
+      for (const l of stale) {
+        const name = `${l.firstName || ""} ${l.lastName || ""}`.trim() || "(No name)";
+        const summary =
+          l.latestActivityAdmin ||
+          l.latestActivity ||
+          l.journalLastEntryAdmin ||
+          l.journalLastEntry ||
+          "No recent updates";
+
+        const when = l._lastMs ? formatDT(l._lastMs) : "—";
+        const leadUrl = `${baseUrl}/agent-view/${encodeURIComponent(l.id)}`;
+        lines.push(`• ${name} — last activity: ${when}`);
+        lines.push(`  ${summary}`);
+        lines.push(`  Open: ${leadUrl}`);
+        lines.push("");
+      }
+    }
+  }
+
+  lines.push("Thank you,");
+  lines.push("WRC Leads");
+
+  return {
+    subject,
+    body: lines.join("\n"),
+    // count = number of recently updated leads (keeps your “send anyway?” prompt meaningful)
+    count: updated.length,
+  };
+}
+
+function toMillisAny(v) {
+  if (!v) return 0;
+  if (typeof v === "number") return v;
+  if (v?.toMillis) return v.toMillis(); // Firestore Timestamp
+  const t = new Date(v).getTime();
+  return Number.isNaN(t) ? 0 : t;
+}
+
+function formatWhenFromNotif(n) {
+  const ms =
+    toMillisAny(n.eventAtMs) ||
+    toMillisAny(n.updatedAt) ||
+    toMillisAny(n.latestActivityAt) ||
+    toMillisAny(n.createdAt);
+
+  if (!ms) return "";
+  return new Date(ms).toLocaleString();
+}
+
 
 // ---------- Small helpers ----------
+function safeDocId(row) {
+  // Prefer Firestore doc id you already set as docId
+  const id = row?.docId;
+  if (id && String(id).trim()) return String(id).trim();
+
+  // Fallbacks (rare)
+  if (row?.id && String(row.id).trim()) return String(row.id).trim();
+  if (row?._id && String(row._id).trim()) return String(row._id).trim();
+
+  return "";
+}
+
 function normName(s) {
   return String(s || "")
     .toLowerCase()
@@ -67,15 +340,82 @@ function formatDateTimeFromMillis(ms) {
   });
 }
 
+function getLeadActivityMs(lead) {
+  // 1) explicit activity timestamp
+  const a = toMillis(lead.latestActivityAt);
+  if (a) return a;
+
+  // 2) updatedAt is usually the best “something changed”
+  const u = toMillis(lead.updatedAt);
+  if (u) return u;
+
+  // 3) newest journal entry
+  let latest = 0;
+  if (Array.isArray(lead.journal)) {
+    for (const entry of lead.journal) {
+      const ts = toMillis(entry?.createdAt);
+      if (ts > latest) latest = ts;
+    }
+  }
+  if (latest) return latest;
+
+  // 4) createdAt fallback
+  return toMillis(lead.createdAt) || 0;
+}
+
 function agentKeyForLead(lead) {
-  // Registered assignment
   if (lead.assignedAgentId) return `reg:${lead.assignedAgentId}`;
 
-  // Unregistered assignment by name (normalized)
-  const nm = normName(String(lead.assignedAgentName || "").replace(/\s\*$/, ""));
-  if (nm) return `unreg:${nm}`;
+  const e =
+    normEmail(lead.assignedAgentEmailNorm || lead.assignedAgentEmail || "");
+  if (e) return `unregEmail:${e}`;
+
+  const n =
+    normName(String(lead.assignedAgentNameNorm || lead.assignedAgentName || "").replace(/\s*\*$/, ""));
+  if (n) return `unregName:${n}`;
 
   return "none";
+}
+
+function unregKeyFromEmailOrName(email, name) {
+  const e = normEmail(email || "");
+  if (e) return `unregEmail:${e}`;
+  const n = normName(String(name || "").replace(/\s*\*$/, ""));
+  if (n) return `unregName:${n}`;
+  return "";
+}
+
+
+
+
+
+
+async function getOrCreateAgentOnlyLinkForLead(lead) {
+  // token links only work for REGISTERED agents
+  if (!lead?.assignedAgentId) return null;
+
+  // Reuse an existing token doc if you already made one
+  const q = query(
+    collection(db, "agentLeadAccess"),
+    where("leadId", "==", lead.id),
+    where("assignedAgentId", "==", lead.assignedAgentId),
+    limit(1)
+  );
+
+  const snap = await getDocs(q);
+  if (!snap.empty) {
+    const existing = snap.docs[0];
+    return `${window.location.origin}/agent-view/${existing.id}`;
+  }
+
+  // Otherwise create a new one
+  const ref = await addDoc(collection(db, "agentLeadAccess"), {
+    leadId: lead.id,
+    assignedAgentId: lead.assignedAgentId,
+    createdAt: serverTimestamp(),
+  });
+
+  return `${window.location.origin}/agent-view/${ref.id}`;
 }
 
 // ---------- UI helpers (CSS-only facelift) ----------
@@ -112,15 +452,6 @@ function Chip({ children, onRemove }) {
   );
 }
 
-// Safe millis helper for Firestore Timestamp | Date | string
-function toMillis(value) {
-  if (!value) return null;
-  if (value?.toMillis) return value.toMillis();
-  if (value instanceof Date) return value.getTime();
-  if (typeof value === "number") return value;
-  const t = new Date(value).getTime();
-  return Number.isNaN(t) ? null : t;
-}
 
 function clamp2Style() {
   // avoids needing tailwind line-clamp plugin
@@ -134,37 +465,51 @@ function clamp2Style() {
 
 // ---------- Assign Agent Modal ----------
 
-function AssignAgentModal({ lead, agents, onClose, onAssign, assigning }) {
+function AssignAgentModal({
+  lead,
+  agents,
+  onClose,
+  onAssign,        // primary assignment (existing)
+  onAssignAdd,     // add secondary
+  onAssignRemove,  // remove secondary
+  assigning,
+}) {
   const [selectedId, setSelectedId] = React.useState("");
   const [search, setSearch] = React.useState("");
+  const [secondaryAgentId, setSecondaryAgentId] = React.useState("");
 
   React.useEffect(() => {
-    if (lead?.assignedAgentId) {
-      setSelectedId(lead.assignedAgentId);
-    } else {
-      setSelectedId("");
-    }
+    setSelectedId(lead?.assignedAgentId || "");
   }, [lead]);
 
   const filteredAgents = React.useMemo(() => {
     if (!Array.isArray(agents)) return [];
-
     const term = search.trim().toLowerCase();
-    const base = agents.slice().sort((a, b) => {
-      const aName = (a.name || a.email || "").toLowerCase();
-      const bName = (b.name || b.email || "").toLowerCase();
-      return aName.localeCompare(bName);
-    });
+
+    const base = agents
+      .slice()
+      .sort((a, b) => {
+        const aName = (a.fullName || a.name || a.email || "").toLowerCase();
+        const bName = (b.fullName || b.name || b.email || "").toLowerCase();
+        return aName.localeCompare(bName);
+      });
 
     if (!term) return base;
 
     return base.filter((a) => {
-      const name = (a.name || "").toLowerCase();
+      const name = (a.fullName || a.name || "").toLowerCase();
       const email = (a.email || "").toLowerCase();
       return name.includes(term) || email.includes(term);
     });
   }, [agents, search]);
 
+  const secondaryList = Array.isArray(lead?.assignedAgents) ? lead.assignedAgents : [];
+  const secondaryIds = new Set(secondaryList.map((a) => a.id));
+
+  const canAddSecondary =
+    !!secondaryAgentId &&
+    secondaryAgentId !== lead?.assignedAgentId &&
+    !secondaryIds.has(secondaryAgentId);
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
@@ -183,104 +528,195 @@ function AssignAgentModal({ lead, agents, onClose, onAssign, assigning }) {
         <p className="text-xs text-gray-600 mb-3">
           Lead:{" "}
           <span className="font-semibold">
-            {lead.firstName} {lead.lastName}
+            {lead?.firstName} {lead?.lastName}
           </span>
         </p>
 
-        {!Array.isArray(agents) || agents.length === 0 ?(
+        {!Array.isArray(agents) || agents.length === 0 ? (
           <div className="text-xs text-gray-500">
             No agents found. Make sure agents create an account first.
           </div>
         ) : (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!selectedId) return;
-              onAssign(selectedId);
-            }}
-            className="space-y-4"
-          >
-            <div>
-              <label className="block text-xs font-medium mb-1">
-                Search agents
-              </label>
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Type name or email..."
-                className="w-full border rounded-lg px-2.5 py-1.5 text-xs"
-              />
-              <div className="mt-1 text-[10px] text-gray-400">
-                Showing {filteredAgents.length} of {assignableAgents.length} agents
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium mb-1">
-                Select agent
-              </label>
-              {filteredAgents.length === 0 ? (
-                <div className="text-[11px] text-gray-500 border rounded-lg px-2.5 py-2 bg-gray-50">
-                  No agents match your search.
+          <>
+            {/* PRIMARY ASSIGNMENT */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!selectedId) return;
+                onAssign(selectedId);
+              }}
+              className="space-y-4"
+            >
+              <div>
+                <label className="block text-xs font-medium mb-1">
+                  Search agents
+                </label>
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Type name or email..."
+                  className="w-full border rounded-lg px-2.5 py-1.5 text-xs"
+                />
+                <div className="mt-1 text-[10px] text-gray-400">
+                  Showing {filteredAgents.length} of {agents.length} agents
                 </div>
-              ) : (
-                <select
-                  value={selectedId}
-                  onChange={(e) => setSelectedId(e.target.value)}
-                  className="w-full border rounded-lg px-2.5 py-1.5 text-sm"
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1">
+                  Primary agent
+                </label>
+                {filteredAgents.length === 0 ? (
+                  <div className="text-[11px] text-gray-500 border rounded-lg px-2.5 py-2 bg-gray-50">
+                    No agents match your search.
+                  </div>
+                ) : (
+                  <select
+                    value={selectedId}
+                    onChange={(e) => setSelectedId(e.target.value)}
+                    className="w-full border rounded-lg px-2.5 py-1.5 text-sm"
+                  >
+                    <option value="">Choose an agent...</option>
+                    {filteredAgents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {(a.fullName || a.name || a.email || "Unnamed user") +
+                          (a.email ? ` (${a.email})` : "")}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
                 >
-                  <option value="">Choose an agent...</option>
-                  {filteredAgents.map((a) => (
-                  <option key={a.id} value={a.id}>
-  {(a.name || a.fullName || a.email || "Unnamed user") +
-    (a.email ? ` (${a.email})` : "")}
-</option>
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!selectedId || assigning}
+                  className="px-3 py-1.5 text-xs bg-wrcBlack text-wrcYellow rounded-lg font-semibold disabled:opacity-60"
+                >
+                  {assigning ? "Assigning..." : "Assign primary"}
+                </button>
+              </div>
+            </form>
+
+            {/* SECONDARY ASSIGNMENT */}
+            <div className="mt-5 border-t pt-4">
+              <div className="text-xs font-semibold text-gray-800 mb-2">
+                Also assign to
+              </div>
+
+              <div className="flex gap-2">
+                <select
+                  value={secondaryAgentId}
+                  onChange={(e) => setSecondaryAgentId(e.target.value)}
+                  className="flex-1 border rounded-lg px-2 py-2 text-sm"
+                >
+                  <option value="">Select additional agent...</option>
+                  {agents.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {(a.fullName || a.name || a.email || "Unnamed user") +
+                        (a.email ? ` (${a.email})` : "")}
+                    </option>
                   ))}
                 </select>
+
+                <button
+                  type="button"
+                  disabled={!canAddSecondary || assigning}
+                  onClick={() => {
+                    if (!canAddSecondary) return;
+                    onAssignAdd(secondaryAgentId);
+                    setSecondaryAgentId("");
+                  }}
+                  className="px-3 py-2 rounded-lg bg-black text-white text-sm disabled:opacity-50"
+                >
+                  Add
+                </button>
+              </div>
+
+              {secondaryList.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {secondaryList.map((a) => (
+                    <div
+                      key={a.id}
+                      className="flex items-center justify-between border rounded-lg px-3 py-2"
+                    >
+                      <div className="text-sm">
+                        <div className="font-medium">{a.name || a.email}</div>
+                        {a.email ? (
+                          <div className="text-xs text-gray-500">{a.email}</div>
+                        ) : null}
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={assigning}
+                        onClick={() => onAssignRemove(a)}
+                        className="text-xs px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
-
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!selectedId || assigning}
-                className="px-3 py-1.5 text-xs bg-wrcBlack text-wrcYellow rounded-lg font-semibold disabled:opacity-60"
-              >
-                {assigning ? "Assigning..." : "Assign"}
-              </button>
-            </div>
-          </form>
+          </>
         )}
       </div>
     </div>
   );
 }
 
+
 // ---------- Email Agent Modal ----------
 
 function EmailAgentModal({ lead, onClose }) {
   if (!lead) return null;
 
-  const url = `${window.location.origin}/agent/${lead.id}`;
+  const url = lead.agentUrl;
+
   const to = lead.assignedAgentEmail || "";
-  const subject = `New lead assigned to you: ${lead.firstName} ${lead.lastName}`;
+
+  // helpers for Firestore Timestamp / string dates
+  const formatDueDate = (value) => {
+    if (!value) return "Not set";
+    try {
+      if (value?.toDate) return value.toDate().toLocaleDateString();
+      const d = new Date(value);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleDateString();
+    } catch {}
+    return "Not set";
+  };
+
+  const dueDateText = formatDueDate(lead.nextEvaluationDate);
+  const actionItemText = (lead.actionItem || "").trim() || "None";
+
+  const subject = `WRC Lead — ${lead.firstName || ""} ${lead.lastName || ""}`.trim();
+
   const body = `Hi ${lead.assignedAgentName || ""},
 
-A new lead has been assigned to you in the WRC Lead Dashboard.
+A lead has been assigned to you in the WRC Lead Dashboard.
+
+Lead: ${`${lead.firstName || ""} ${lead.lastName || ""}`.trim()}
+Due date: ${dueDateText}
+Action item: ${actionItemText}
 
 Click this link to view and update the lead:
 ${url}
 
 Thank you.
 `;
+
+  // ... keep the rest of your component the same
+
 
   async function copyText(text, label) {
     try {
@@ -385,13 +821,55 @@ Thank you.
     </div>
   );
 }
+function emailAgentDigest({ toEmail, subject, body }) {
+  const mailto = `mailto:${encodeURIComponent(toEmail)}?subject=${encodeURIComponent(
+    subject
+  )}&body=${encodeURIComponent(body)}`;
+
+  window.location.href = mailto;
+}
+
+function adminActivityPatch(text, actor) {
+  const clean = String(text || "").trim();
+
+  return {
+    // activity rollups used across the UI
+    latestActivityAdmin: clean,
+    latestActivity: clean, // keep in sync so any view can show something
+    latestActivityAt: serverTimestamp(),
+
+    // helpful metadata (optional, but good)
+    updatedByEmail: actor?.email || null,
+    updatedByName: actor?.name || actor?.email || null,
+  };
+}
+async function createAgentOnlyLink(lead) {
+  // lead must have assignedAgentId for this to be enforceable
+  if (!lead?.assignedAgentId) {
+    throw new Error("This lead is not assigned to a registered agent yet.");
+  }
+
+  const accessRef = await addDoc(collection(db, "agentLeadAccess"), {
+    leadId: lead.id,
+    assignedAgentId: lead.assignedAgentId,
+    createdAt: serverTimestamp(),
+  });
+
+  return `${window.location.origin}/agent-view/${accessRef.id}`;
+}
 
 // ---------- Main Admin Dashboard ----------
 
 export default function AdminDashboard() {
+  
+
+  const [showUnreadOnly, setShowUnreadOnly] = useState(false);
   const navigate = useNavigate();
   const { user } = useAuth();
-
+  // Notifications
+// Notifications
+const [notifications, setNotifications] = useState([]);
+const [showReadNotifs, setShowReadNotifs] = useState(false);
     // UI facelift controls
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -443,6 +921,7 @@ const { agents: assignableAgents, loading: agentsLoading } = useAssignableAgents
 
   const [agentLeadsOpen, setAgentLeadsOpen] = useState(false);
 const [agentLeadsTarget, setAgentLeadsTarget] = useState(null); 
+
 // { key, name, email, isPlaceholder }
 
   // Sort config
@@ -454,68 +933,175 @@ const [agentLeadsTarget, setAgentLeadsTarget] = useState(null);
   const headerPad = dense ? "py-1" : "py-2";
   const cellPad = dense ? "py-1" : "py-2";
 
-  // Notifications
-  const [notifications, setNotifications] = useState([]);
+useEffect(() => {
+  if (!user) return;
 
-  useEffect(() => {
-    if (!user) return;
+  // Build query based on toggle
+  const base = collection(db, "adminNotifications");
 
-    const q = query(
-      collection(db, "adminNotifications"),
-      where("isRead", "==", false),
-      orderBy("createdAt", "desc"),
-      limit(20)
-    );
+  const q = showReadNotifs
+    ? query(base, orderBy("createdAt", "desc"), limit(200)) // show all (read + unread)
+    : query(base, where("isRead", "==", false), orderBy("createdAt", "desc"), limit(50)); // unread only
 
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const items = [];
-        snap.forEach((docSnap) => {
-          items.push({ id: docSnap.id, ...docSnap.data() });
-        });
-        setNotifications(items);
-      },
-      (err) => {
-        console.error("Error loading admin notifications:", err);
-      }
-    );
+  const unsub = onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setNotifications(items);
+    },
+    (err) => console.error("Error loading admin notifications:", err)
+  );
 
-    return () => unsub();
-  }, [user]);
+  return () => unsub();
+}, [user, showReadNotifs]);
 
-  async function handleNotificationClick(n) {
-    try {
-      const ref = doc(db, "adminNotifications", n.id);
-      await updateDoc(ref, { isRead: true });
-    } catch (err) {
-      console.error("Error marking notification read:", err);
-    }
 
-    if (n.leadId) {
-      navigate(`/admin/lead/${n.leadId}`);
-    }
+
+const unreadCount = React.useMemo(
+  () => notifications.filter((n) => !n.isRead).length,
+  [notifications]
+);
+
+const visibleNotifications = React.useMemo(() => {
+  return showUnreadOnly
+    ? notifications.filter((n) => !n.isRead)
+    : notifications;
+}, [notifications, showUnreadOnly]);
+
+
+
+
+async function handleNotificationClick(n) {
+  if (n.leadId) {
+    navigate(`/admin/lead/${encodeURIComponent(n.leadId)}`);
+
   }
-async function handleDeleteUnregisteredAgent(agentRow) {
-  // agentRow is one row from agentStats
-  // We expect: { id, name, isPlaceholder: true, ... }
 
+  try {
+    const ref = doc(db, "adminNotifications", n.id);
+    await updateDoc(ref, { isRead: true });
+  } catch (err) {
+    console.error("Error marking notification read:", err);
+  }
+}
+
+async function addSecondAgentToLead({ leadId, agent, user }) {
+  const ref = doc(db, "leads", leadId);
+
+  const agentObj = {
+    id: agent.id,
+    name: agent.fullName || agent.name || agent.email,
+    email: agent.email || null,
+  };
+
+  await updateDoc(ref, {
+    assignedAgents: arrayUnion(agentObj),
+    updatedAt: serverTimestamp(),
+    updatedBy: user.uid,
+  });
+}
+async function handleEmailDigestForAgent(agentRow) {
+  const sinceMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  if (!agentRow?.email) {
+    alert("No agent email on file for this agent.");
+    return;
+  }
+
+  const all = Array.isArray(leads) ? leads : [];
+
+  const agentIds = new Set(
+    [agentRow.id, agentRow.uid].filter(Boolean).map((v) => String(v))
+  );
+
+  const agentEmail = normEmail(agentRow.email || "");
+  const agentNameNorm = normName(String(agentRow.name || "").replace(/\s\*$/, ""));
+
+  const leadMatchesAgent = (l) => {
+    if (!l) return false;
+
+    // ---------- Registered matching ----------
+    if (!agentRow.isPlaceholder) {
+      // primary id
+      if (l.assignedAgentId && agentIds.has(String(l.assignedAgentId))) return true;
+
+      // secondary ids
+      if (Array.isArray(l.assignedAgentIds)) {
+        if (l.assignedAgentIds.some((x) => agentIds.has(String(x)))) return true;
+      }
+
+      // secondary agent objects
+      if (Array.isArray(l.assignedAgents)) {
+        for (const a of l.assignedAgents) {
+          const aId = a?.id != null ? String(a.id) : "";
+          const aUid = a?.uid != null ? String(a.uid) : "";
+          if (aId && agentIds.has(aId)) return true;
+          if (aUid && agentIds.has(aUid)) return true;
+
+          const aEmail = normEmail(a?.email || "");
+          const aEmailNorm = normEmail(a?.emailNorm || "");
+          if (agentEmail && (aEmail === agentEmail || aEmailNorm === agentEmail)) return true;
+        }
+      }
+
+      // secondary email norms array
+      if (agentEmail && Array.isArray(l.assignedAgentEmailNorms)) {
+        if (l.assignedAgentEmailNorms.map(normEmail).includes(agentEmail)) return true;
+      }
+
+      // fallback: primary email on lead
+      const primaryEmail = normEmail(l.assignedAgentEmailNorm || l.assignedAgentEmail || "");
+      if (agentEmail && primaryEmail === agentEmail) return true;
+
+      return false;
+    }
+
+    // ---------- Placeholder matching ----------
+    const leadEmail = normEmail(l.assignedAgentEmailNorm || l.assignedAgentEmail || "");
+    const leadName = normName(String(l.assignedAgentNameNorm || l.assignedAgentName || "").replace(/\s\*$/, ""));
+
+    if (agentEmail && leadEmail && leadEmail === agentEmail) return true;
+    if (agentNameNorm && leadName && leadName === agentNameNorm) return true;
+
+    return false;
+  };
+
+  const agentLeadsRaw = all.filter(leadMatchesAgent);
+
+  // ✅ Dedup by id in case a lead matches multiple ways
+  const agentLeads = Array.from(new Map(agentLeadsRaw.map((l) => [l.id, l])).values());
+
+  // Debug line (keep temporarily)
+  console.log("[digest] agent:", agentRow.name, agentRow.email, "matched leads:", agentLeads.map(l => l.id));
+
+  const { subject, body, count } = await buildAgentDigestEmailAsync({
+    agentName: agentRow.name,
+    agentEmail: agentRow.email,
+    leads: agentLeads,
+    sinceMs,
+  });
+
+  if (count === 0) {
+    const ok = window.confirm("No updates found in the last 7 days. Send anyway?");
+    if (!ok) return;
+  }
+
+  emailAgentDigest({ toEmail: agentRow.email, subject, body });
+}
+
+
+async function handleDeleteUnregisteredAgent(agentRow) {
   const display = agentRow?.name || "Unregistered agent";
 
-  // figure out which leads are currently assigned to this placeholder
-  const affected = (Array.isArray(leads) ? leads : []).filter((l) => {
-    // Only unregistered-style leads: no assignedAgentId, but name matches
-    if (l.assignedAgentId) return false;
-    const k = agentKeyForLead(l);
-    const agentKey =
-      agentRow.id?.startsWith("unreg:") ? agentRow.id : `unreg:${normName(display.replace(/\s\*$/, ""))}`;
-    return k === agentKey;
-  });
+  const targetEmail = normEmail(agentRow?.email || "");
+  const targetName = normName(String(display).replace(/\s*\*$/, ""));
 
   const msg =
     `Delete "${display}"?\n\n` +
-    `Leads currently assigned to this unregistered agent: ${affected.length}\n\n` +
-    `OK = Delete + unassign those leads\nCancel = Do nothing`;
+    `This will:\n` +
+    `• Unassign any leads matching this unregistered agent (by email/name)\n` +
+    `• Delete ALL duplicate unregisteredAgents docs that match (by email/name)\n\n` +
+    `OK = Continue\nCancel = Do nothing`;
 
   const confirmed = window.confirm(msg);
   if (!confirmed) return;
@@ -523,24 +1109,49 @@ async function handleDeleteUnregisteredAgent(agentRow) {
   try {
     const batch = writeBatch(db);
 
-    // 1) Unassign leads so the agent truly disappears
+    // -------- 1) Unassign matching leads (email-first, then name) --------
+    const affected = (Array.isArray(leads) ? leads : []).filter((l) => {
+      if (l.assignedAgentId) return false; // only "unregistered-style" leads
+
+      const leadEmail = normEmail(l.assignedAgentEmailNorm || l.assignedAgentEmail || "");
+      const leadName = normName(String(l.assignedAgentName || "").replace(/\s*\*$/, ""));
+
+      if (targetEmail && leadEmail && leadEmail === targetEmail) return true;
+      if (!targetEmail && targetName && leadName && leadName === targetName) return true;
+
+      // (optional safety) if your lead stores unregistered agents in assignedAgents array
+      if (Array.isArray(l.assignedAgents) && l.assignedAgents.length > 0) {
+        return l.assignedAgents.some((a) => {
+          const aEmail = normEmail(a?.emailNorm || a?.email || "");
+          const aName = normName(String(a?.name || "").replace(/\s*\*$/, ""));
+          if (targetEmail && aEmail && aEmail === targetEmail) return true;
+          if (!targetEmail && targetName && aName && aName === targetName) return true;
+          return false;
+        });
+      }
+
+      return false;
+    });
+
     affected.forEach((l) => {
       const ref = doc(db, "leads", l.id);
-
       const text = `Admin deleted unregistered agent "${display}" and unassigned this lead.`;
 
       batch.update(ref, {
         assignedAgentId: null,
         assignedAgentName: null,
         assignedAgentEmail: null,
+        assignedAgentEmailNorm: null,
+        // also clear arrays if you use them for unregistered assignments
+        assignedAgentEmailNorms: [],
+        assignedAgents: [],
         updatedAt: serverTimestamp(),
         updatedBy: user.uid,
-
-        latestActivity: text,
+        ...adminActivityPatch(text),
         journalLastEntry: text,
         journal: arrayUnion({
           id: crypto.randomUUID(),
-          createdAt: new Date(),
+          createdAt: serverTimestamp(),
           createdBy: user.uid,
           createdByEmail: user.email,
           text,
@@ -549,52 +1160,100 @@ async function handleDeleteUnregisteredAgent(agentRow) {
       });
     });
 
-    // 2) Delete the placeholder doc (ONLY if it exists in your DB)
-    // If your placeholder docs live in "unregisteredAgents":
-    // agentRow.id might be a Firestore doc id OR your synthetic "unreg:john smith"
-    // If you created docs with real ids, delete those. If not, skip safely.
-    if (agentRow.id && !agentRow.id.startsWith("unreg:")) {
-      batch.delete(doc(db, "unregisteredAgents", agentRow.id));
+    // -------- 2) Delete ALL matching unregisteredAgents docs --------
+    // NOTE: We don't assume your unregisteredAgents docs have emailNorm fields, so we scan client-side.
+    const snap = await getDocs(collection(db, "unregisteredAgents"));
+
+    const docsToDelete = snap.docs.filter((d) => {
+      const data = d.data() || {};
+      const dEmail = normEmail(data.email || data.emailNorm || "");
+      const dName = normName(String(data.name || "").replace(/\s*\*$/, ""));
+
+      if (targetEmail) return dEmail && dEmail === targetEmail;
+      return targetName && dName && dName === targetName;
+    });
+
+    docsToDelete.forEach((d) => batch.delete(doc(db, "unregisteredAgents", d.id)));
+
+    // Also delete the specific doc id if agentRow.id is "unreg:<docId>"
+    // (in case your UI row points to a real doc)
+    const rawId = String(agentRow?.id || "");
+    if (rawId.startsWith("unreg:")) {
+      const realDocId = rawId.slice("unreg:".length);
+      if (realDocId) batch.delete(doc(db, "unregisteredAgents", realDocId));
     }
 
     await batch.commit();
 
-    alert(`Deleted "${display}" and unassigned ${affected.length} lead(s).`);
+    alert(
+      `Deleted "${display}".\n` +
+        `Unassigned ${affected.length} lead(s).\n` +
+        `Deleted ${docsToDelete.length} unregisteredAgents doc(s).`
+    );
   } catch (err) {
     console.error("Delete unregistered agent error:", err);
     alert("Error deleting unregistered agent. Check console.");
   }
 }
 
-  async function handleMarkNotificationsRead() {
-    if (!notifications.length) return;
 
-    try {
-      const batch = writeBatch(db);
-      notifications.forEach((n) => {
-        const ref = doc(db, "adminNotifications", n.id);
-        batch.update(ref, { isRead: true });
-      });
-      await batch.commit();
-    } catch (err) {
-      console.error("Error marking notifications as read:", err);
-      alert("Error marking notifications as read. See console.");
-    }
+async function handleMarkNotificationsRead() {
+  const unread = notifications.filter((n) => !n.isRead);
+  if (!unread.length) return;
+
+  try {
+    const batch = writeBatch(db);
+    unread.forEach((n) => {
+      const ref = doc(db, "adminNotifications", n.id);
+      batch.update(ref, { isRead: true });
+    });
+    await batch.commit();
+  } catch (err) {
+    console.error("Error marking notifications as read:", err);
+    alert("Error marking notifications as read. See console.");
   }
+}
+
 function openAgentLeads(agentRow) {
-  // Build a stable key to filter leads
-  const key = agentRow.isPlaceholder
-    ? (agentRow.id?.startsWith("unreg:") ? agentRow.id : `unreg:${normName(String(agentRow.name || "").replace(/\s\*$/, ""))}`)
-    : `reg:${agentRow.id}`;
+  console.log("[openAgentLeads] clicked:", agentRow);
+  const nameNorm = normName(String(agentRow.name || "").replace(/\s\*$/, ""));
+  const emailN = normEmail(agentRow.email || "");
+
+  const key = agentRow.isPlaceholder ? `unreg:${nameNorm}` : `reg:${agentRow.id}`;
 
   setAgentLeadsTarget({
+    id: agentRow.id || "",                 // keep whatever you have
+    uid: agentRow.uid || agentRow.id || "",// ✅ uid fallback
     key,
     name: agentRow.name,
     email: agentRow.email || "",
     isPlaceholder: !!agentRow.isPlaceholder,
   });
+
   setAgentLeadsOpen(true);
 }
+
+
+
+
+// function getLeadActivityMs(lead) {
+//   // 1) explicit activity timestamp
+//   const a = toMillis(lead.latestActivityAt);
+//   if (a) return a;
+
+//   // 2) latest journal entry
+//   let latest = 0;
+//   if (Array.isArray(lead.journal)) {
+//     for (const entry of lead.journal) {
+//       const ts = toMillis(entry?.createdAt);
+//       if (ts > latest) latest = ts;
+//     }
+//   }
+//   if (latest) return latest;
+
+//   // 3) fallbacks
+//   return toMillis(lead.updatedAt) || toMillis(lead.createdAt) || 0;
+// }
 
   // ---------- Table sorting helpers ----------
 
@@ -687,15 +1346,16 @@ function openAgentLeads(agentRow) {
   // ---------- Firestore subscription ----------
 
   useEffect(() => {
-    const q = query(collection(db, "leads"), orderBy("createdAt", "desc"));
+    const q = query(collection(db, "leads"), orderBy("createdAt", "desc"), limit(500));
 
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const items = snap.docs.map((docSnap) => ({
-          id: docSnap.id,
-          ...docSnap.data(),
-        }));
+      const items = snap.docs.map((docSnap) => ({
+  ...docSnap.data(),
+  id: docSnap.id, // ✅ must be LAST so it wins
+}));
+
         setLeads(items);
         setLoading(false);
       },
@@ -707,6 +1367,44 @@ function openAgentLeads(agentRow) {
 
     return () => unsub();
   }, []);
+const lastNotifiedByLeadRef = React.useRef({});
+
+useEffect(() => {
+  if (!user) return;
+
+  const q = query(collection(db, "leads"), orderBy("updatedAt", "desc"), limit(50));
+
+  const unsub = onSnapshot(
+    q,
+    async (snap) => {
+      for (const ch of snap.docChanges()) {
+        if (ch.type !== "modified") continue;
+
+        const data = ch.doc.data();
+        const leadId = ch.doc.id;
+
+        // ✅ prefer latestActivityAt, fallback to updatedAt
+        const updatedMs =
+          (data.latestActivityAt?.toMillis?.() ? data.latestActivityAt.toMillis() : 0) ||
+          (data.updatedAt?.toMillis?.() ? data.updatedAt.toMillis() : 0) ||
+          0;
+
+        if (!updatedMs) continue;
+
+        const last = lastNotifiedByLeadRef.current[leadId] || 0;
+        if (updatedMs <= last) continue;
+
+        lastNotifiedByLeadRef.current[leadId] = updatedMs;
+
+        await createAdminNotificationFromLead({ id: leadId, ...data });
+      }
+    },
+    (err) => console.error("Lead update watcher error:", err)
+  );
+
+  return () => unsub();
+}, [user]);
+
 
   // ---------- Bulk selection helpers ----------
 
@@ -815,27 +1513,29 @@ function openAgentLeads(agentRow) {
           text = `Admin bulk confirmed assignment for ${newName}.`;
         }
 
-        batch.update(ref, {
-        assignedAgentId: agent.isPlaceholder ? null : agent.id,
-assignedAgentName: agent.isPlaceholder
-  ? agent.name.replace(/\s\*$/, "").trim()
-  : agent.fullName || agent.email,
-assignedAgentEmail: agent.email || null,
+batch.update(ref, {
+  assignedAgentId: agent.isPlaceholder ? null : agent.id,
+  assignedAgentName: agent.isPlaceholder
+    ? agent.name.replace(/\s\*$/, "").trim()
+    : agent.fullName || agent.email,
+  assignedAgentEmail: agent.email || null,
 
-          updatedAt: serverTimestamp(),
-          updatedBy: user.uid,
+  updatedAt: serverTimestamp(),
+  updatedBy: user.uid,
 
-          latestActivity: text,
-          journalLastEntry: text,
-          journal: arrayUnion({
-            id: crypto.randomUUID(),
-            createdAt: new Date(),
-            createdBy: user.uid,
-            createdByEmail: user.email,
-            text,
-            type: "bulk-assignment",
-          }),
-        });
+  ...adminActivityPatch(text),
+
+  journalLastEntry: text,
+  journal: arrayUnion({
+    id: crypto.randomUUID(),
+    createdAt: serverTimestamp(),
+    createdBy: user.uid,
+    createdByEmail: user.email,
+    text,
+    type: "bulk-assignment",
+  }),
+});
+
 
         count++;
 
@@ -860,6 +1560,59 @@ assignedAgentEmail: agent.email || null,
       setBulkWorking(false);
     }
   }
+async function createAdminNotificationFromLead(leadDoc) {
+  try {
+    const leadId = leadDoc?.id;
+    if (!leadId) return;
+
+    const leadName =
+      `${leadDoc.firstName || ""} ${leadDoc.lastName || ""}`.trim() || "(No name)";
+
+    const latest =
+      leadDoc.latestActivityAdmin ||
+      leadDoc.latestActivity ||
+      leadDoc.journalLastEntry ||
+      "Lead updated";
+
+    // ✅ event timestamp: when the change happened (not when notif doc was written)
+    const eventMs =
+      (leadDoc.latestActivityAt?.toMillis?.() ? leadDoc.latestActivityAt.toMillis() : 0) ||
+      (leadDoc.updatedAt?.toMillis?.() ? leadDoc.updatedAt.toMillis() : 0) ||
+      0;
+
+    if (!eventMs) return;
+
+    // ✅ idempotent notif id prevents duplicates
+    const notifId = `${leadId}_${eventMs}`;
+
+    await setDoc(
+      doc(db, "adminNotifications", notifId),
+      {
+        leadId,
+        leadName,
+        latestActivity: latest,
+
+        updatedByName:
+          leadDoc.updatedByName ||
+          leadDoc.updatedByEmail ||
+          user?.email ||
+          "Admin",
+        updatedBy: leadDoc.updatedBy || null,
+
+        // timestamps
+        eventAtMs: eventMs,          // when the lead actually changed
+        createdAt: serverTimestamp(),// when the notif record was written
+
+        isRead: false,
+      },
+      { merge: true } // safe upsert
+    );
+  } catch (err) {
+    console.error("Error creating admin notification:", err);
+  }
+}
+
+
 
   // ---------- New lead creation ----------
 
@@ -925,7 +1678,9 @@ assignedAgentEmail: agent.email || null,
         updatedAt: serverTimestamp(),
         updatedBy: user.uid,
 
-        latestActivity: activityWithAssignment,
+        latestActivityAdmin: activityWithAssignment,
+latestActivity: activityWithAssignment,
+latestActivityAt: serverTimestamp(),
       };
 
       await addDoc(collection(db, "leads"), payload);
@@ -996,25 +1751,28 @@ if (agent.isPlaceholder) {
 }
 
 await updateDoc(ref, {
-  assignedAgentId: agent.id,
-  assignedAgentName: agent.fullName || agent.email,
-  assignedAgentEmail: agent.email || null,
-  assignedAgentNameNorm: normName(agent.fullName || agent.email),
-  assignedAgentEmailNorm: normEmail(agent.email),
+  assignedAgentId,
+  assignedAgentName,
+  assignedAgentEmail,
+  assignedAgentIds: assignedAgentId ? arrayUnion(assignedAgentId) : [], 
+  assignedAgentNameNorm: normName(assignedAgentName || ""),
+  assignedAgentEmailNorm: normEmail(assignedAgentEmail || ""),
   updatedAt: serverTimestamp(),
   updatedBy: user.uid,
 
-  latestActivity: text,
+  ...adminActivityPatch(text),
+
   journalLastEntry: text,
   journal: arrayUnion({
     id: crypto.randomUUID(),
-    createdAt: new Date(),
+    createdAt: serverTimestamp(),
     createdBy: user.uid,
     createdByEmail: user.email,
     text,
     type: "assignment",
   }),
 });
+
 
 
       handleCloseAssign();
@@ -1027,41 +1785,144 @@ await updateDoc(ref, {
 
   // ---------- Agent link / email helpers ----------
 
-  function getAgentUrl(lead) {
-    return `${window.location.origin}/agent/${lead.id}`;
+async function handleCopyAgentLink(lead) {
+  try {
+    const url = await createAgentOnlyLinkForLead(lead);
+
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = url;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "absolute";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+
+    alert(`Agent-only link copied:\n\n${url}`);
+  } catch (err) {
+    console.error("createAgentOnlyLinkForLead error:", err);
+    alert(err.message || "Could not create agent-only link.");
   }
+}
 
-  async function handleCopyAgentLink(lead) {
-    const url = getAgentUrl(lead);
+function leadsForAgent(agentRow, allLeads) {
+  const rows = Array.isArray(allLeads) ? allLeads : [];
+  if (!agentRow) return [];
 
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        const textarea = document.createElement("textarea");
-        textarea.value = url;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "absolute";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
+  const ids = new Set(
+    [agentRow.id, agentRow.uid]
+      .filter(Boolean)
+      .map((v) => String(v))
+  );
+
+  const email = normEmail(agentRow.email || "");
+  const nameNorm = normName(String(agentRow.name || "").replace(/\s\*$/, ""));
+
+  return rows.filter((l) => {
+    // ---------------------------
+    // Registered agent matching
+    // ---------------------------
+    if (!agentRow.isPlaceholder) {
+      // primary id
+      if (l.assignedAgentId && ids.has(String(l.assignedAgentId))) return true;
+
+      // secondary ids array
+      if (Array.isArray(l.assignedAgentIds)) {
+        if (l.assignedAgentIds.some((x) => ids.has(String(x)))) return true;
       }
 
-      alert(`Agent link copied:\n\n${url}`);
-    } catch (err) {
-      console.error("Clipboard error:", err);
-      alert(`Could not auto-copy. Here is the link:\n\n${url}`);
+      // secondary agents objects (support both id + uid, plus email/emailNorm)
+      if (Array.isArray(l.assignedAgents)) {
+        for (const a of l.assignedAgents) {
+          const aId = a?.id != null ? String(a.id) : "";
+          const aUid = a?.uid != null ? String(a.uid) : "";
+          if (aId && ids.has(aId)) return true;
+          if (aUid && ids.has(aUid)) return true;
+
+          const aEmail = normEmail(a?.email || "");
+          const aEmailNorm = normEmail(a?.emailNorm || "");
+          if (email && (aEmail === email || aEmailNorm === email)) return true;
+        }
+      }
+
+      // secondary email norms array
+      if (email && Array.isArray(l.assignedAgentEmailNorms)) {
+        if (l.assignedAgentEmailNorms.map(normEmail).includes(email)) return true;
+      }
+
+      // fallback: primary email on lead
+      const primaryEmail = normEmail(l.assignedAgentEmailNorm || l.assignedAgentEmail || "");
+      if (email && primaryEmail && primaryEmail === email) return true;
+
+      return false;
     }
+
+    // ---------------------------
+    // Placeholder matching
+    // ---------------------------
+    const leadEmail = normEmail(l.assignedAgentEmailNorm || l.assignedAgentEmail || "");
+    const leadName = normName(
+      String(l.assignedAgentNameNorm || l.assignedAgentName || "").replace(/\s\*$/, "")
+    );
+
+    if (email && leadEmail && leadEmail === email) return true;
+    if (nameNorm && leadName && leadName === nameNorm) return true;
+
+    return false;
+  });
+}
+
+
+
+
+
+
+async function handleEmailDigestForAgent(agentRow) {
+  const sinceMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  const agentLeads = leadsForAgent(agentRow, leads); // ✅ includes secondary
+
+  if (!agentRow.email) {
+    alert("No agent email on file for this agent.");
+    return;
   }
 
-  function handleEmailAgent(lead) {
-    if (!lead.assignedAgentEmail) {
-      alert("No agent email on this lead.");
-      return;
-    }
-    setEmailLead(lead);
+  const { subject, body, count } = await buildAgentDigestEmailAsync({
+    agentName: agentRow.name,
+    agentEmail: agentRow.email,
+    leads: agentLeads,
+    sinceMs,
+  });
+
+  if (count === 0) {
+    const ok = window.confirm("No updates found in the last 7 days. Send anyway?");
+    if (!ok) return;
   }
+
+  emailAgentDigest({ toEmail: agentRow.email, subject, body });
+}
+
+
+async function handleEmailAgent(lead) {
+  if (!lead.assignedAgentEmail) {
+    alert("No agent email on this lead.");
+    return;
+  }
+
+  try {
+    const agentUrl = await createAgentOnlyLinkForLead(lead);
+    setEmailLead({ ...lead, agentUrl }); // pass the token url into the modal
+  } catch (err) {
+    console.error("Email link create error:", err);
+    alert(err.message || "Could not create agent-only link for email.");
+  }
+}
+
 
   async function handleDeleteLead(lead) {
     const confirmMsg = `Are you sure you want to delete this lead?\n\n${lead.firstName} ${
@@ -1213,146 +2074,288 @@ await updateDoc(ref, {
 
   // ---------- Agent stats ----------
 
- const agentStats = React.useMemo(() => {
-  // NOTE: don't early-return just because leads is empty;
-  // we still want to see registered/unregistered agents with 0 leads.
-  if (!Array.isArray(assignableAgents)) {
-    return [];
+const agentStats = React.useMemo(() => {
+  if (!Array.isArray(assignableAgents)) return [];
+
+  const registeredCounts = {};   // by uid
+  const unregisteredCounts = {}; // by unregKey
+
+    const nameToEmail = new Map();
+
+  assignableAgents
+    .filter((a) => a.isPlaceholder)
+    .forEach((a) => {
+      const n = normName(String(a.name || "").replace(/\s*\*$/, ""));
+      const e = normEmail(a.email || "");
+      if (n && e) nameToEmail.set(n, e);
+    });
+
+  (Array.isArray(leads) ? leads : []).forEach((lead) => {
+    const n = normName(String(lead.assignedAgentName || "").replace(/\s*\*$/, ""));
+    const e = normEmail(lead.assignedAgentEmailNorm || lead.assignedAgentEmail || "");
+    if (n && e && !nameToEmail.has(n)) nameToEmail.set(n, e);
+  });
+// ✅ Build a name->email map so name-only leads collapse into email-key
+// const nameToEmail = new Map();
+
+// // 1) From placeholders (unregistered agents)
+// assignableAgents
+//   .filter((a) => a.isPlaceholder)
+//   .forEach((a) => {
+//     const n = normName(String(a.name || "").replace(/\s*\*$/, ""));
+//     const e = normEmail(a.email || "");
+//     if (n && e) nameToEmail.set(n, e);
+//   });
+
+// // 2) From leads (when both exist)
+// (Array.isArray(leads) ? leads : []).forEach((lead) => {
+//   const n = normName(String(lead.assignedAgentName || "").replace(/\s*\*$/, ""));
+//   const e = normEmail(lead.assignedAgentEmailNorm || lead.assignedAgentEmail || "");
+//   if (n && e && !nameToEmail.has(n)) nameToEmail.set(n, e);
+// });
+
+// 3) Count leads
+// (Array.isArray(leads) ? leads : []).forEach((lead) => {
+//   const isHot = lead.relationshipRanking === "78" || lead.relationshipRanking === "100";
+
+//   const idsFromArray = Array.isArray(lead.assignedAgentIds) ? lead.assignedAgentIds.filter(Boolean) : [];
+//   const idsFromObjects = Array.isArray(lead.assignedAgents) ? lead.assignedAgents.map((a) => a?.id).filter(Boolean) : [];
+//   const primaryId = lead.assignedAgentId ? [lead.assignedAgentId] : [];
+//   const registeredIds = Array.from(new Set([...idsFromArray, ...idsFromObjects, ...primaryId]));
+
+//   // registered counts
+//   if (registeredIds.length > 0) {
+//     registeredIds.forEach((id) => {
+//       const k = String(id);
+//       if (!registeredCounts[k]) registeredCounts[k] = { total: 0, hot: 0 };
+//       registeredCounts[k].total += 1;
+//       if (isHot) registeredCounts[k].hot += 1;
+//     });
+//     return;
+//   }
+
+//   // ✅ unregistered counts (email-first; name-only uses nameToEmail map)
+//   const emailNorm = normEmail(lead.assignedAgentEmailNorm || lead.assignedAgentEmail || "");
+//   const nameNorm = normName(String(lead.assignedAgentName || "").replace(/\s*\*$/, ""));
+
+//   let key = "";
+//   if (emailNorm) {
+//     key = `unregEmail:${emailNorm}`;
+//   } else if (nameNorm) {
+//     const mappedEmail = nameToEmail.get(nameNorm);
+//     key = mappedEmail ? `unregEmail:${mappedEmail}` : `unregName:${nameNorm}`;
+//   } else {
+//     return;
+//   }
+
+//   if (!unregisteredCounts[key]) unregisteredCounts[key] = { total: 0, hot: 0 };
+//   unregisteredCounts[key].total += 1;
+//   if (isHot) unregisteredCounts[key].hot += 1;
+// });
+
+  const stats = [];
+
+  function unregKeyFromEmailOrName(email, name) {
+    const e = normEmail(email || "");
+    if (e) return `unregEmail:${e}`;
+    const n = normName(String(name || "").replace(/\s*\*$/, ""));
+    if (n) return `unregName:${n}`;
+    return "";
   }
 
-  const registeredCounts = {};
-  const unregisteredCounts = {};
-
-  // 1) Scan all leads and count by registered ID and by unregistered name
+  // 1) Count leads
   (Array.isArray(leads) ? leads : []).forEach((lead) => {
-    // Registered: counted by assignedAgentId
-    if (lead.assignedAgentId) {
-      const id = lead.assignedAgentId;
-      if (!registeredCounts[id]) {
-        registeredCounts[id] = { total: 0, hot: 0 };
-      }
-      registeredCounts[id].total += 1;
+    const isHot = lead.relationshipRanking === "78" || lead.relationshipRanking === "100";
 
-      if (
-        lead.relationshipRanking === "78" ||
-        lead.relationshipRanking === "100"
-      ) {
-        registeredCounts[id].hot += 1;
-      }
+    const idsFromArray = Array.isArray(lead.assignedAgentIds)
+      ? lead.assignedAgentIds.filter(Boolean)
+      : [];
+
+    const idsFromObjects = Array.isArray(lead.assignedAgents)
+      ? lead.assignedAgents.map((a) => a?.id).filter(Boolean)
+      : [];
+
+    const primaryId = lead.assignedAgentId ? [lead.assignedAgentId] : [];
+
+    const registeredIds = Array.from(new Set([...idsFromArray, ...idsFromObjects, ...primaryId]));
+
+    // ✅ registered counts
+    if (registeredIds.length > 0) {
+      registeredIds.forEach((id) => {
+        const k = String(id);
+        if (!registeredCounts[k]) registeredCounts[k] = { total: 0, hot: 0 };
+        registeredCounts[k].total += 1;
+        if (isHot) registeredCounts[k].hot += 1;
+      });
+      // IMPORTANT: do NOT return here if you also want to count unregistered secondary agents
+      // If your rule is: "if lead has any registered agent, skip unregistered counting", keep the return.
+      return;
     }
-    // Unregistered: counted by plain name
-    else if (lead.assignedAgentName) {
-      const key = String(lead.assignedAgentName)
-        .replace(/\s\*$/, "")
-        .trim()
-        .toLowerCase();
-      if (!key) return;
 
-      if (!unregisteredCounts[key]) {
-        unregisteredCounts[key] = { total: 0, hot: 0 };
-      }
-      unregisteredCounts[key].total += 1;
+    // ✅ unregistered: count by lead primary email/name
+// ✅ unregistered: email-first, else name->email collapse
+const emailNorm = normEmail(lead.assignedAgentEmailNorm || lead.assignedAgentEmail || "");
+const nameNorm = normName(String(lead.assignedAgentName || "").replace(/\s*\*$/, ""));
 
-      if (
-        lead.relationshipRanking === "78" ||
-        lead.relationshipRanking === "100"
-      ) {
-        unregisteredCounts[key].hot += 1;
-      }
-    }
+let key = "";
+if (emailNorm) {
+  key = `unregEmail:${emailNorm}`;
+} else if (nameNorm) {
+  const mapped = nameToEmail.get(nameNorm);
+  key = mapped ? `unregEmail:${mapped}` : `unregName:${nameNorm}`;
+} else {
+  return;
+}
+
+if (!unregisteredCounts[key]) unregisteredCounts[key] = { total: 0, hot: 0 };
+unregisteredCounts[key].total += 1;
+if (isHot) unregisteredCounts[key].hot += 1;
+
+    if (!key) return;
+
+    if (!unregisteredCounts[key]) unregisteredCounts[key] = { total: 0, hot: 0 };
+    unregisteredCounts[key].total += 1;
+    if (isHot) unregisteredCounts[key].hot += 1;
   });
 
-  const statsByKey = new Map();
-
-  // Helper: find an email for an unregistered agent by name from leads
-  function findEmailForName(normalizedName) {
-    const lowerName = (normalizedName || "").toLowerCase();
-    const match = (Array.isArray(leads) ? leads : []).find((lead) => {
-      const ln = String(lead.assignedAgentName || "")
-        .replace(/\s\*$/, "")
-        .trim()
-        .toLowerCase();
-      return ln === lowerName && !!lead.assignedAgentEmail;
+  // helper: derive email for unregistered NAME key (only used when we have no email)
+  function findEmailForNameKey(nameKeyOnly) {
+    const target = `unregName:${nameKeyOnly}`;
+    const match = (Array.isArray(leads) ? leads : []).find((l) => {
+      const key = unregKeyFromEmailOrName(l.assignedAgentEmailNorm || l.assignedAgentEmail, l.assignedAgentName);
+      return key === target && (l.assignedAgentEmailNorm || l.assignedAgentEmail);
     });
-    return match ? match.assignedAgentEmail : "";
+    return match ? (match.assignedAgentEmailNorm || match.assignedAgentEmail) : "";
   }
 
-  // 2) Registered agents from assignableAgents (users collection)
+  // 2) Registered agents
   assignableAgents
-    .filter((a) => !a.isPlaceholder) // real registered users
+    .filter((a) => !a.isPlaceholder)
     .forEach((a) => {
-      const st = registeredCounts[a.id] || { total: 0, hot: 0 };
-      const row = {
-        id: a.id,
-        name: a.name || a.fullName || a.email || "Unknown",
+      const uid = String(a.id || a.uid || "");
+      const st = registeredCounts[uid] || { total: 0, hot: 0 };
+
+      stats.push({
+        id: uid,
+        uid,
+        name: a.fullName || a.name || a.email || "Unknown",
         email: a.email || "",
         total: st.total,
         hot: st.hot,
         isPlaceholder: false,
-      };
-      statsByKey.set(`reg:${a.id}`, row);
+      });
     });
 
-  // 3) Any *placeholders* from unregisteredAgents that match our counts
+  // 3) Unregistered placeholders from collection
   assignableAgents
     .filter((a) => a.isPlaceholder)
     .forEach((a) => {
-      const key = (a.name || "")
-        .replace(/\s\*$/, "")
-        .trim()
-        .toLowerCase();
+      const key = unregKeyFromEmailOrName(a.email, a.name);
+      if (!key) return;
 
       const st = unregisteredCounts[key] || { total: 0, hot: 0 };
 
-      // email priority:
-      //   1) email stored on unregisteredAgents doc
-      //   2) first lead that has this assignedAgentName + assignedAgentEmail
-      const derivedEmail = findEmailForName(key);
+      // if placeholder has no email, and key is name-based, try derive an email from leads
+      const nameKeyOnly = normName(String(a.name || "").replace(/\s*\*$/, ""));
+      const derivedEmail = !a.email && key.startsWith("unregName:") ? findEmailForNameKey(nameKeyOnly) : "";
       const email = a.email || derivedEmail || "";
 
-      const row = {
-        id: a.id,
-        name: a.name, // already includes *
+      stats.push({
+        id: a.id,     // keep original doc id for delete button
+        uid: a.id,
+        name: a.name || "Unregistered",
         email,
         total: st.total,
         hot: st.hot,
         isPlaceholder: true,
-      };
-
-      statsByKey.set(`unreg:${key}`, row);
+      });
     });
 
-  // 4) Extra unregistered names that only exist on leads (no doc in unregisteredAgents)
+  // 4) Any unregistered keys that exist only on leads (not in placeholders)
   Object.entries(unregisteredCounts).forEach(([key, st]) => {
-    const already = statsByKey.has(`unreg:${key}`);
-    if (already) return;
+    const exists = stats.some((r) => r.isPlaceholder && keyForAgentRow(r) === key);
+    if (exists) return;
 
-    // Turn "john smith" into "John Smith *"
-    const displayName =
-      key
-        .split(" ")
-        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-        .join(" ")
-        .trim() + " *";
+    if (key.startsWith("unregEmail:")) {
+      const email = key.replace("unregEmail:", "");
+      stats.push({
+        id: `auto:${key}`,
+        uid: `auto:${key}`,
+        name: `${email} *`,
+        email,
+        total: st.total,
+        hot: st.hot,
+        isPlaceholder: true,
+      });
+      return;
+    }
 
-    const email = findEmailForName(key);
+    if (key.startsWith("unregName:")) {
+      const nameKeyOnly = key.replace("unregName:", "");
+      const email = findEmailForNameKey(nameKeyOnly) || "";
+      const displayName =
+        nameKeyOnly
+          .split(" ")
+          .filter(Boolean)
+          .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+          .join(" ")
+          .trim() + " *";
 
-    statsByKey.set(`unreg:${key}`, {
-      id: `unreg:${key}`,
-      name: displayName,
-      email,
-      total: st.total,
-      hot: st.hot,
-      isPlaceholder: true,
-    });
+      stats.push({
+        id: `auto:${key}`,
+        uid: `auto:${key}`,
+        name: displayName,
+        email,
+        total: st.total,
+        hot: st.hot,
+        isPlaceholder: true,
+      });
+    }
   });
 
-  // 5) Sort by name for nice UI
-  return Array.from(statsByKey.values()).sort((a, b) =>
-    (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())
+  // --- FINAL DEDUPE PASS ---
+  const deduped = new Map();
+
+  function keyForAgentRow(row) {
+    if (!row) return "";
+    if (row.isPlaceholder) {
+      const e = normEmail(row.email || "");
+      if (e) return `unregEmail:${e}`;
+      const n = normName(String(row.name || "").replace(/\s*\*$/, ""));
+      if (n) return `unregName:${n}`;
+      return "";
+    }
+    return `reg:${String(row.id || row.uid || "")}`;
+  }
+
+  for (const row of stats) {
+    const k = keyForAgentRow(row);
+    if (!k) continue;
+
+    const prev = deduped.get(k);
+    if (!prev) {
+      deduped.set(k, row);
+      continue;
+    }
+
+    // merge counts (keep max instead of sum to avoid double-counting if two rows represent same agent)
+    prev.total = Math.max(prev.total || 0, row.total || 0);
+    prev.hot = Math.max(prev.hot || 0, row.hot || 0);
+
+    // keep best display fields
+    if (!prev.email && row.email) prev.email = row.email;
+    if ((!prev.name || prev.name.includes("*")) && row.name && !row.name.includes("*")) prev.name = row.name;
+
+    // keep the real placeholder doc id if one exists (so delete works)
+    if (prev.isPlaceholder && row.isPlaceholder) {
+      if (String(prev.id || "").startsWith("auto:") && row.id) prev.id = row.id;
+    }
+  }
+
+  return Array.from(deduped.values()).sort((a, b) =>
+    String(a.name || "").toLowerCase().localeCompare(String(b.name || "").toLowerCase())
   );
 }, [assignableAgents, leads]);
-
 
   // ---------- Action item save ----------
 
@@ -1391,7 +2394,8 @@ await updateDoc(ref, {
           type: "action-item",
         }),
 
-        latestActivity: text,
+    ...adminActivityPatch(text),
+
       });
 
       setLastSavedActionItemId(lead.id);
@@ -1411,33 +2415,35 @@ await updateDoc(ref, {
 
   // ---------- Delete user (agent) ----------
 
-  async function handleDeleteUser(agent) {
-    if (!agent?.id) {
-      alert("Cannot delete: user ID missing.");
-      return;
-    }
+async function handleDeleteUser(agent) {
+  const uid = agent?.uid || agent?.id; // prefer uid if you store it
 
-    const msg = `Are you sure you want to delete this user?\n\n${
-      agent.fullName || agent.email
-    }\n\nThis will delete their Firebase Auth account and their Firestore profile (users/${
-      agent.id
-    }).\n\nLeads will NOT be deleted.`;
-
-    if (!window.confirm(msg)) return;
-
-    try {
-      const result = await deleteUserByUid({ uid: agent.id });
-
-      if (result?.data?.success) {
-        alert(`User deleted:\n${agent.fullName || agent.email}`);
-      } else {
-        alert("Delete function did not confirm success. Check console.");
-      }
-    } catch (err) {
-      console.error("Error deleting user:", err);
-      alert("Error deleting user (see console).");
-    }
+  if (!uid) {
+    alert("Cannot delete: user UID missing.");
+    return;
   }
+
+  const msg = `Are you sure you want to delete this user?\n\n${
+    agent.fullName || agent.email
+  }\n\nThis will delete their Firebase Auth account and their Firestore profile (users/${uid}).\n\nLeads will NOT be deleted.`;
+
+  if (!window.confirm(msg)) return;
+
+  try {
+    const result = await deleteUserByUid({ uid });
+
+ if (result?.data?.success) {
+  alert(`User deleted:\n${agent.fullName || agent.email}`);
+}
+else {
+      alert("Delete function did not confirm success. Check console.");
+    }
+  } catch (err) {
+    console.error("Error deleting user:", err);
+    alert("Error deleting user (see console).");
+  }
+}
+
 
   // ---------- Export CSV ----------
 
@@ -1608,6 +2614,125 @@ await updateDoc(ref, {
     return { rows, delimiter };
   }
 
+async function handleAssignAdd(agentId) {
+  if (!assigningLead) return;
+
+  const agent = assignableAgents?.find((a) => a.id === agentId);
+  if (!agent) return alert("Agent not found.");
+
+  // Don’t allow adding the primary as secondary
+  if (assigningLead.assignedAgentId && assigningLead.assignedAgentId === agentId) {
+    return alert("That agent is already the primary assignment.");
+  }
+
+  const agentObj = {
+    id: agent.id,
+    name: agent.fullName || agent.name || agent.email,
+    email: agent.email || "",
+    emailNorm: (agent.email || "").toLowerCase().trim(),
+  };
+
+  const ref = doc(db, "leads", assigningLead.id);
+
+  const text = `Admin added ${agentObj.name} to this lead.`;
+
+  try {
+    setAssigning(true);
+
+    // Read latest to prevent stale overwrite
+    const snap = await getDoc(ref);
+    if (!snap.exists()) throw new Error("Lead not found.");
+
+    const current = snap.data();
+    const currentList = Array.isArray(current.assignedAgents) ? current.assignedAgents : [];
+    const exists = currentList.some((a) => a.id === agentObj.id);
+
+    if (exists) {
+      alert("That agent is already assigned as an additional agent.");
+      return;
+    }
+
+    const nextList = [...currentList, agentObj];
+
+    await updateDoc(ref, {
+      assignedAgents: nextList,
+      assignedAgentIds: arrayUnion(agent.id),
+      updatedAt: serverTimestamp(),
+      updatedBy: user.uid,
+
+      ...adminActivityPatch(text, { email: user.email, name: user.email }),
+
+      journalLastEntry: text,
+      journal: arrayUnion({
+        id: crypto.randomUUID(),
+        createdAt: serverTimestamp(),
+        createdBy: user.uid,
+        createdByEmail: user.email,
+        text,
+        type: "assignment-add",
+      }),
+    });
+
+    // Update local modal state so UI reflects immediately
+    setAssigningLead((prev) =>
+      prev ? { ...prev, assignedAgents: nextList } : prev
+    );
+  } catch (err) {
+    console.error("handleAssignAdd error:", err);
+    alert(err.message || "Error adding agent.");
+  } finally {
+    setAssigning(false);
+  }
+}
+
+async function handleAssignRemove(agentObj) {
+  if (!assigningLead) return;
+
+  const ref = doc(db, "leads", assigningLead.id);
+  const text = `Admin removed ${agentObj.name || agentObj.email || "agent"} from this lead.`;
+
+  try {
+    setAssigning(true);
+
+    // Read latest to prevent stale overwrite
+    const snap = await getDoc(ref);
+    if (!snap.exists()) throw new Error("Lead not found.");
+
+    const current = snap.data();
+    const currentList = Array.isArray(current.assignedAgents) ? current.assignedAgents : [];
+    const nextList = currentList.filter((a) => a.id !== agentObj.id);
+
+    await updateDoc(ref, {
+      assignedAgents: nextList,
+      updatedAt: serverTimestamp(),
+      updatedBy: user.uid,
+
+      ...adminActivityPatch(text, { email: user.email, name: user.email }),
+
+      journalLastEntry: text,
+      journal: arrayUnion({
+        id: crypto.randomUUID(),
+        createdAt: serverTimestamp(),
+        createdBy: user.uid,
+        createdByEmail: user.email,
+        text,
+        type: "assignment-remove",
+      }),
+    });
+
+    // Update local modal state so UI reflects immediately
+    setAssigningLead((prev) =>
+      prev ? { ...prev, assignedAgents: nextList } : prev
+    );
+  } catch (err) {
+    console.error("handleAssignRemove error:", err);
+    alert(err.message || "Error removing agent.");
+  } finally {
+    setAssigning(false);
+  }
+}
+
+
   async function handleCsvFileChange(e) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1622,18 +2747,86 @@ await updateDoc(ref, {
         return;
       }
 
-      const rawHeaders = rows[0].map((h) => h.trim());
-      const dataRows = rows.slice(1).map((cols, idx) => ({
-        id: String(idx),
-        cols: cols.map((c) => c.trim()),
-      }));
+  const rawHeaders = rows[0].map((h) => h.trim());
+
+// 🔑 build lookup of existing leads ONCE per upload
+const existingById = new Map(
+  (Array.isArray(leads) ? leads : [])
+    .filter((l) => l?.id)
+    .map((l) => [String(l.id), l])
+);
+
+// 🔁 build preview rows WITH diff metadata
+const dataRows = rows.slice(1).map((cols, idx) => {
+  const trimmedCols = cols.map((c) => (c ?? "").toString().trim());
+
+  // light extraction (preview-only)
+  const emailGuess =
+    trimmedCols.find((c) => /@/.test(c)) || "";
+
+  const phoneGuess =
+    trimmedCols.find(
+      (c) => c.replace(/\D/g, "").length >= 10
+    ) || "";
+
+  const leadId = buildLeadId({
+    email: emailGuess,
+    phone: phoneGuess,
+  });
+
+  const existing = leadId
+    ? existingById.get(leadId)
+    : null;
+
+  const incomingComparable = {
+    email: normEmailLocal(emailGuess),
+    phone: normPhoneLocal(phoneGuess),
+  };
+
+  const existingComparable = existing
+    ? {
+        email: normEmailLocal(existing.email),
+        phone: normPhoneLocal(existing.phone),
+      }
+    : null;
+
+  const changedFields = existing
+    ? shallowDiff(
+        existingComparable,
+        incomingComparable,
+        ["email", "phone"]
+      )
+    : ["(new)"];
+
+  const status = !leadId
+    ? "no_id"
+    : !existing
+    ? "new"
+    : changedFields.length
+    ? "update"
+    : "no_change";
+
+  return {
+    id: String(idx),      // checkbox id
+    cols: trimmedCols,    // original row data
+    leadId,               // email_ / phone_
+    status,               // new | update | no_change | no_id
+    changedFields,        // diff display
+  };
+});
+
 
       setCsvPreview({
         headers: rawHeaders,
         rows: dataRows,
       });
 
-      setCsvSelectedRowIds(dataRows.map((r) => r.id));
+      setCsvSelectedRowIds(
+  dataRows
+    .filter((r) => r.status === "new" || r.status === "update")
+    .map((r) => r.id)
+);
+
       setCsvPreviewOpen(true);
     } catch (err) {
       console.error("Error parsing CSV:", err);
@@ -2056,12 +3249,27 @@ assignedAgentEmail: matchedAssignedAgentEmail || null,
           createdBy: user.uid,
           updatedAt: serverTimestamp(),
           updatedBy: user.uid,
-          latestActivity: "Lead imported from CSV (selected row).",
+          ...adminActivityPatch("Lead imported from CSV (selected row)."),
+
         };
 
 
 
-        await addDoc(collection(db, "leads"), payload);
+        const emailNorm = (email || "").toLowerCase().trim();
+const phoneNorm = (phone || "").replace(/[^\d]/g, "");
+
+const leadId =
+  emailNorm ? `email_${emailNorm}` :
+  phoneNorm ? `phone_${phoneNorm}` :
+  null;
+
+if (!leadId) {
+  // last resort: no stable identifier → still create new doc
+  await addDoc(collection(db, "leads"), payload);
+} else {
+  await setDoc(doc(db, "leads", leadId), payload, { merge: true });
+}
+
         createdCount++;
       }
 
@@ -2080,334 +3288,372 @@ assignedAgentEmail: matchedAssignedAgentEmail || null,
 
   // ---------- Render ----------
 
-  return (
-    <div className="space-y-4 text-sm w-full px-2 sm:px-4 lg:px-6">
-      {/* Header */}
-{/* Page shell */}
-<div className="max-w-[1600px] mx-auto space-y-6">
-  {/* Header / toolbar */}
-  <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <h1 className="text-lg font-semibold text-gray-900">
-          Admin Lead Dashboard
-        </h1>
-        <p className="text-xs text-gray-600">
-          Signed in as <span className="font-medium">{user?.email}</span>
-        </p>
-      </div>
+return (
+  <div className="min-h-screen bg-gray-50">
+    <div className="w-full px-4 sm:px-6 lg:px-10 py-6">
+      <div className="mx-auto w-full max-w-[1600px] space-y-6 text-sm">
+        {/* Header / toolbar */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="text-lg font-semibold text-gray-900">
+                Admin Lead Dashboard
+              </h1>
+              <p className="text-xs text-gray-600">
+                Signed in as <span className="font-medium">{user?.email}</span>
+              </p>
+            </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          disabled={importing}
-          onClick={() => fileInputRef.current?.click()}
-          className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-        >
-          {importing ? "Importing..." : "Import CSV"}
-        </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={importing}
+                onClick={() => fileInputRef.current?.click()}
+                className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+              >
+                {importing ? "Importing..." : "Import CSV"}
+              </button>
 
-        <button
-          type="button"
-          onClick={handleExportCsv}
-          className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50"
-        >
-          Export CSV
-        </button>
+ <VleadsImportButton actor={{ uid: user?.uid, email: user?.email }} />
 
-        <button
-          type="button"
-          onClick={() => setFiltersOpen((v) => !v)}
-          className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50"
-        >
-          Filters
-        </button>
 
-        <button
-          onClick={() => setShowNew(true)}
-          className="bg-wrcBlack text-wrcYellow text-xs font-semibold px-4 py-2 rounded-full hover:bg-black"
-        >
-          + New lead
-        </button>
-      </div>
-    </div>
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50"
+              >
+                Export CSV
+              </button>
 
-    {/* Search + density */}
-    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-      <div className="w-full sm:max-w-md">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search name, email, phone, status, source..."
-          className="w-full border border-gray-300 rounded-xl px-3 py-2 text-xs"
-        />
-      </div>
+              <button
+                type="button"
+                onClick={() => setFiltersOpen((v) => !v)}
+                className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50"
+              >
+                Filters
+              </button>
 
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setDense((d) => !d)}
-          className="text-[11px] px-3 py-2 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50"
-        >
-          Row density: <span className="font-medium">{dense ? "Compact" : "Comfortable"}</span>
-        </button>
-      </div>
-    </div>
-
-    {/* Filters panel */}
-    {filtersOpen && (
-      <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
-          <div className="flex items-center gap-1 mr-2">
-            <button
-              type="button"
-              onClick={() => setDateQuickFilter("all")}
-              className={cx(
-                "px-3 py-1 rounded-full border text-[11px]",
-                dateQuickFilter === "all"
-                  ? "bg-gray-900 text-white border-gray-900"
-                  : "border-gray-300 text-gray-700 hover:bg-white"
-              )}
-            >
-              All
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setDateQuickFilter("overdue")}
-              className={cx(
-                "px-3 py-1 rounded-full border text-[11px]",
-                dateQuickFilter === "overdue"
-                  ? "bg-rose-600 text-white border-rose-600"
-                  : "border-gray-300 text-gray-700 hover:bg-white"
-              )}
-            >
-              Overdue
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setDateQuickFilter("thisWeek")}
-              className={cx(
-                "px-3 py-1 rounded-full border text-[11px]",
-                dateQuickFilter === "thisWeek"
-                  ? "bg-amber-500 text-white border-amber-500"
-                  : "border-gray-300 text-gray-700 hover:bg-white"
-              )}
-            >
-              Next 7 days
-            </button>
+              <button
+                type="button"
+                onClick={() => setShowNew(true)}
+                className="bg-wrcBlack text-wrcYellow text-xs font-semibold px-4 py-2 rounded-full hover:bg-black"
+              >
+                + New lead
+              </button>
+            </div>
           </div>
 
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-          >
-            <option value="">All statuses</option>
-            {Object.entries(STATUS_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+          {/* Search + density */}
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="w-full sm:max-w-md">
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search name, email, phone, status, source..."
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-xs bg-white"
+              />
+            </div>
 
-          <select
-            value={sourceFilter}
-            onChange={(e) => setSourceFilter(e.target.value)}
-            className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-          >
-            <option value="">All sources</option>
-            {Object.entries(SOURCE_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setDense((d) => !d)}
+                className="text-[11px] px-3 py-2 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 bg-white"
+              >
+                Row density:{" "}
+                <span className="font-medium">
+                  {dense ? "Compact" : "Comfortable"}
+                </span>
+              </button>
+            </div>
+          </div>
 
-          <select
-            value={relationshipFilter}
-            onChange={(e) => setRelationshipFilter(e.target.value)}
-            className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-          >
-            <option value="">All relationship ranks</option>
-            {Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+          {/* Filters panel */}
+          {filtersOpen && (
+            <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <div className="flex items-center gap-1 mr-2">
+                  <button
+                    type="button"
+                    onClick={() => setDateQuickFilter("all")}
+                    className={cx(
+                      "px-3 py-1 rounded-full border text-[11px]",
+                      dateQuickFilter === "all"
+                        ? "bg-gray-900 text-white border-gray-900"
+                        : "border-gray-300 text-gray-700 hover:bg-white"
+                    )}
+                  >
+                    All
+                  </button>
 
-          <select
-            value={urgencyFilter}
-            onChange={(e) => setUrgencyFilter(e.target.value)}
-            className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-          >
-            <option value="">All urgency levels</option>
-            {Object.entries(URGENCY_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+                  <button
+                    type="button"
+                    onClick={() => setDateQuickFilter("overdue")}
+                    className={cx(
+                      "px-3 py-1 rounded-full border text-[11px]",
+                      dateQuickFilter === "overdue"
+                        ? "bg-rose-600 text-white border-rose-600"
+                        : "border-gray-300 text-gray-700 hover:bg-white"
+                    )}
+                  >
+                    Overdue
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDateQuickFilter("thisWeek")}
+                    className={cx(
+                      "px-3 py-1 rounded-full border text-[11px]",
+                      dateQuickFilter === "thisWeek"
+                        ? "bg-amber-500 text-white border-amber-500"
+                        : "border-gray-300 text-gray-700 hover:bg-white"
+                    )}
+                  >
+                    Next 7 days
+                  </button>
+                </div>
+
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+                >
+                  <option value="">All statuses</option>
+                  {Object.entries(STATUS_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value)}
+                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+                >
+                  <option value="">All sources</option>
+                  {Object.entries(SOURCE_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={relationshipFilter}
+                  onChange={(e) => setRelationshipFilter(e.target.value)}
+                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+                >
+                  <option value="">All relationship ranks</option>
+                  {Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={urgencyFilter}
+                  onChange={(e) => setUrgencyFilter(e.target.value)}
+                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+                >
+                  <option value="">All urgency levels</option>
+                  {Object.entries(URGENCY_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStatusFilter("");
+                    setSourceFilter("");
+                    setRelationshipFilter("");
+                    setUrgencyFilter("");
+                    setDateQuickFilter("all");
+                    setSearch("");
+                  }}
+                  className="ml-auto px-3 py-2 rounded-xl border border-gray-300 text-[11px] text-gray-700 hover:bg-white"
+                >
+                  Clear all
+                </button>
+              </div>
+
+              {/* Active chips */}
+              <div className="mt-3 flex flex-wrap gap-2">
+                {dateQuickFilter !== "all" && (
+                  <Chip onRemove={() => setDateQuickFilter("all")}>
+                    Due:{" "}
+                    {dateQuickFilter === "overdue" ? "Overdue" : "Next 7 days"}
+                  </Chip>
+                )}
+                {statusFilter && (
+                  <Chip onRemove={() => setStatusFilter("")}>
+                    Status: {STATUS_LABELS[statusFilter] || statusFilter}
+                  </Chip>
+                )}
+                {sourceFilter && (
+                  <Chip onRemove={() => setSourceFilter("")}>
+                    Source: {SOURCE_LABELS[sourceFilter] || sourceFilter}
+                  </Chip>
+                )}
+                {relationshipFilter && (
+                  <Chip onRemove={() => setRelationshipFilter("")}>
+                    Relationship:{" "}
+                    {RELATIONSHIP_LABELS[relationshipFilter] ||
+                      relationshipFilter}
+                  </Chip>
+                )}
+                {urgencyFilter && (
+                  <Chip onRemove={() => setUrgencyFilter("")}>
+                    Urgency: {URGENCY_LABELS[urgencyFilter] || urgencyFilter}
+                  </Chip>
+                )}
+                {search.trim() && (
+                  <Chip onRemove={() => setSearch("")}>
+                    Search: “{search.trim()}”
+                  </Chip>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Stats row */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <StatCard label="Total leads" value={dashboardStats.total} />
+          <StatCard label="Unassigned" value={dashboardStats.unassigned} />
+          <StatCard label="Overdue" value={dashboardStats.overdue} />
+          <StatCard label="Due next 7 days" value={dashboardStats.dueNext7} />
+          <StatCard
+            label="Hot leads"
+            value={dashboardStats.hot}
+            sublabel="Relationship 78% or 100%"
+          />
+        </div>
+
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,text/csv"
+          className="hidden"
+          onChange={handleCsvFileChange}
+        />
+
+        {/* Notifications banner */}
+{/* Notifications banner */}
+{notifications.length > 0 && (
+  <div className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs">
+<div className="flex items-center justify-between mb-1 gap-2">
+  <div className="font-semibold text-amber-900">
+    {notifications.length} lead{notifications.length > 1 ? "s" : ""} updated
+  </div>
+
+  <div className="flex items-center gap-2">
+    <button
+      type="button"
+      onClick={() => setShowReadNotifs((v) => !v)}
+      className="text-[11px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100"
+    >
+      {showReadNotifs ? "Show unread only" : "Show read too"}
+    </button>
+
+    <button
+      type="button"
+      onClick={handleMarkNotificationsRead}
+      className="text-[11px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100"
+    >
+      Mark all as read
+    </button>
+  </div>
+</div>
+
+
+    <div className="space-y-1 max-h-40 overflow-y-auto">
+      {visibleNotifications.map((n) => (
+        <div
+          key={n.id}
+          className={`flex items-start justify-between gap-2 border-b border-amber-100 pb-1 last:border-b-0 ${
+            n.isRead ? "opacity-60" : ""
+          }`}
+        >
+          <div>
+            <div className="font-medium text-amber-900">
+              {n.leadName}{" "}
+              <span className="text-[10px] text-amber-700">({n.leadId})</span>
+            </div>
+          <div className="text-[11px] text-amber-900">
+  {n.latestActivity || "Lead updated"}
+</div>
+<div className="text-[10px] text-amber-700 mt-0.5">
+  {formatWhenFromNotif(n) ? `When: ${formatWhenFromNotif(n)}` : ""}
+</div>
+{n.eventAtMs ? (
+  <div className="text-[10px] text-amber-700">
+    When: {formatDT(n.eventAtMs)}
+  </div>
+) : null}
+
+            <div className="text-[10px] text-amber-700">
+              Updated by: {n.updatedByName}
+            </div>
+          </div>
 
           <button
             type="button"
-            onClick={() => {
-              setStatusFilter("");
-              setSourceFilter("");
-              setRelationshipFilter("");
-              setUrgencyFilter("");
-              setDateQuickFilter("all");
-              setSearch("");
-            }}
-            className="ml-auto px-3 py-2 rounded-xl border border-gray-300 text-[11px] text-gray-700 hover:bg-white"
+            onClick={() => handleNotificationClick(n)}
+            className="text-[10px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100 flex-shrink-0"
           >
-            Clear all
+            View lead
           </button>
         </div>
-
-        {/* Active chips */}
-        <div className="mt-3 flex flex-wrap gap-2">
-          {dateQuickFilter !== "all" && (
-            <Chip onRemove={() => setDateQuickFilter("all")}>
-              Due: {dateQuickFilter === "overdue" ? "Overdue" : "Next 7 days"}
-            </Chip>
-          )}
-          {statusFilter && (
-            <Chip onRemove={() => setStatusFilter("")}>
-              Status: {STATUS_LABELS[statusFilter] || statusFilter}
-            </Chip>
-          )}
-          {sourceFilter && (
-            <Chip onRemove={() => setSourceFilter("")}>
-              Source: {SOURCE_LABELS[sourceFilter] || sourceFilter}
-            </Chip>
-          )}
-          {relationshipFilter && (
-            <Chip onRemove={() => setRelationshipFilter("")}>
-              Relationship: {RELATIONSHIP_LABELS[relationshipFilter] || relationshipFilter}
-            </Chip>
-          )}
-          {urgencyFilter && (
-            <Chip onRemove={() => setUrgencyFilter("")}>
-              Urgency: {URGENCY_LABELS[urgencyFilter] || urgencyFilter}
-            </Chip>
-          )}
-          {search.trim() && (
-            <Chip onRemove={() => setSearch("")}>Search: “{search.trim()}”</Chip>
-          )}
-        </div>
-      </div>
-    )}
+      ))}
+    </div>
   </div>
+)}
 
-  {/* Stats row */}
-  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-    <StatCard label="Total leads" value={dashboardStats.total} />
-    <StatCard label="Unassigned" value={dashboardStats.unassigned} />
-    <StatCard label="Overdue" value={dashboardStats.overdue} />
-    <StatCard label="Due next 7 days" value={dashboardStats.dueNext7} />
-    <StatCard label="Hot leads" value={dashboardStats.hot} sublabel="Relationship 78% or 100%" />
-  </div>
-
-  {/* (Keep the rest of your page content below, unchanged) */}
-
-      </div>
-
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".csv,text/csv"
-        className="hidden"
-        onChange={handleCsvFileChange}
-      />
-
-      {/* Notifications banner */}
-      {notifications.length > 0 && (
-        <div className="mb-4 border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs">
-          <div className="flex items-center justify-between mb-1">
-            <div className="font-semibold text-amber-900">
-              {notifications.length} lead
-              {notifications.length > 1 ? "s" : ""} updated by agents
-            </div>
-            <button
-              type="button"
-              onClick={handleMarkNotificationsRead}
-              className="text-[11px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100"
-            >
-              Mark all as read
-            </button>
-          </div>
-
-          <div className="space-y-1 max-h-40 overflow-y-auto">
-            {notifications.map((n) => (
-              <div
-                key={n.id}
-                className="flex items-start justify-between gap-2 border-b border-amber-100 pb-1 last:border-b-0"
-              >
-                <div>
-                  <div className="font-medium text-amber-900">
-                    {n.leadName}{" "}
-                    <span className="text-[10px] text-amber-700">
-                      ({n.leadId})
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-amber-900">
-                    {n.latestActivity}
-                  </div>
-                  <div className="text-[10px] text-amber-700">
-                    Updated by: {n.updatedByName}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleNotificationClick(n)}
-                  className="text-[10px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100 flex-shrink-0"
-                >
-                  View lead
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Agent summary */}
+{/* Agent summary */}
 {agentStats.length > 0 && (
   <div className="border border-gray-200 rounded-lg bg-white p-3 text-xs">
+    {/* Header (does NOT scroll) */}
     <div className="flex items-center justify-between mb-2">
       <span className="font-semibold text-gray-700">Agent summary</span>
-      <span className="text-[11px] text-gray-500">
-        Based on current leads
-      </span>
+      <span className="text-[11px] text-gray-500">Based on current leads</span>
     </div>
 
-    <div className="overflow-auto">
+    {/* Scrollable content (does scroll) */}
+    <div className="max-h-[220px] overflow-y-auto overflow-x-auto pr-1">
       <table className="min-w-full text-[11px]">
-        <thead className="bg-gray-50 border-b border-gray-200">
+        {/* Sticky table header (optional but nice) */}
+        <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
           <tr className="uppercase tracking-wide text-gray-500">
             <th className="px-2 py-1 text-left">Agent</th>
             <th className="px-2 py-1 text-left">Email</th>
             <th className="px-2 py-1 text-right">Total leads</th>
             <th className="px-2 py-1 text-right">Hot leads</th>
+            <th className="px-2 py-1 text-right">Digest</th>
             <th className="px-2 py-1 text-right">Delete</th>
           </tr>
         </thead>
+
         <tbody>
           {agentStats.map((a) => (
             <tr key={a.id} className="border-b border-gray-100">
               <td className="px-2 py-1">
-               <button
-  type="button"
-  onClick={() => openAgentLeads(a)}
-  className="text-left text-blue-700 hover:underline"
-  title="View all leads for this agent"
->
-  <span className={a.isPlaceholder ? "italic" : ""}>{a.name}</span>
-</button>
+                <button
+                  type="button"
+                  onClick={() => openAgentLeads(a)}
+                  className="text-left text-blue-700 hover:underline"
+                  title="View all leads for this agent"
+                >
+                  <span className={a.isPlaceholder ? "italic" : ""}>
+                    {a.name}
+                  </span>
+                </button>
 
                 {a.isPlaceholder && (
                   <span className="ml-1 text-[10px] text-gray-500">
@@ -2415,6 +3661,7 @@ assignedAgentEmail: matchedAssignedAgentEmail || null,
                   </span>
                 )}
               </td>
+
               <td className="px-2 py-1 text-blue-700">
                 {a.email || (
                   <span className="text-gray-400">
@@ -2422,34 +3669,51 @@ assignedAgentEmail: matchedAssignedAgentEmail || null,
                   </span>
                 )}
               </td>
+
               <td className="px-2 py-1 text-right">{a.total}</td>
+
               <td className="px-2 py-1 text-right">
                 {a.hot > 0 ? (
-                  <span className="font-semibold text-amber-700">
-                    {a.hot}
-                  </span>
+                  <span className="font-semibold text-amber-700">{a.hot}</span>
                 ) : (
                   <span className="text-gray-400">0</span>
                 )}
               </td>
+
               <td className="px-2 py-1 text-right">
-          {a.isPlaceholder ? (
-  <button
-    type="button"
-    onClick={() => handleDeleteUnregisteredAgent(a)}
-    className="px-2 py-1 border border-rose-300 text-rose-700 rounded-full text-[10px] hover:bg-rose-50"
-  >
-    Delete unregistered
-  </button>
-) : (
-  <button
-    type="button"
-    onClick={() => handleDeleteUser(a)}
-    className="px-2 py-1 border border-red-300 text-red-700 rounded-full text-[10px] hover:bg-red-50"
-  >
-    Delete user
-  </button>
-)}
+                <button
+                  type="button"
+                  disabled={!a.email}
+                  onClick={() => handleEmailDigestForAgent(a)}
+                  className="px-2 py-1 border border-gray-300 rounded-full text-[10px] text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  title={
+                    a.email
+                      ? "Email this agent a digest of recent lead updates"
+                      : "No email on file"
+                  }
+                >
+                  Email digest
+                </button>
+              </td>
+
+              <td className="px-2 py-1 text-right">
+                {a.isPlaceholder ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteUnregisteredAgent(a)}
+                    className="px-2 py-1 border border-rose-300 text-rose-700 rounded-full text-[10px] hover:bg-rose-50"
+                  >
+                    Delete unregistered
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteUser(a)}
+                    className="px-2 py-1 border border-red-300 text-red-700 rounded-full text-[10px] hover:bg-red-50"
+                  >
+                    Delete user
+                  </button>
+                )}
               </td>
             </tr>
           ))}
@@ -2460,618 +3724,482 @@ assignedAgentEmail: matchedAssignedAgentEmail || null,
 )}
 
 
-      {/* Leads list card */}
-      <div className="border border-gray-200 rounded-lg bg-white">
-        {/* Top bar */}
-        <div className="border-b border-gray-200 px-3 py-2 space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-gray-700">
-                Leads ({filteredLeads.length}
-                {filteredLeads.length !== leads.length &&
-                  ` of ${leads.length}`}
-                )
+        {/* Leads list card */}
+        <div className="border border-gray-200 rounded-lg bg-white">
+          {/* Bulk bar */}
+          {selectedLeadIds.length > 0 && (
+            <div className="px-3 py-2 border-b border-gray-200 bg-amber-50 flex flex-wrap items-center gap-3 text-[11px]">
+              <span className="font-semibold text-amber-900">
+                {selectedLeadIds.length} lead(s) selected
               </span>
-              {loading && (
-                <span className="text-[11px] text-gray-500">Loading...</span>
-              )}
-            </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setDense((d) => !d)}
-                className="text-[11px] px-2 py-1 border border-gray-300 rounded-full text-gray-700 hover:bg-gray-50"
-              >
-                Row density:{" "}
-                <span className="font-medium">
-                  {dense ? "Compact" : "Comfortable"}
-                </span>
-              </button>
+              {Array.isArray(assignableAgents) &&
+                assignableAgents.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={bulkAssignAgentId}
+                      onChange={(e) => setBulkAssignAgentId(e.target.value)}
+                      className="border border-amber-300 rounded px-2 py-1"
+                    >
+                      <option value="">Assign to agent...</option>
+                      {assignableAgents.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {(a.fullName || a.email || "Unnamed user") +
+                            (a.email ? ` (${a.email})` : "")}
+                        </option>
+                      ))}
+                    </select>
 
-              <div className="w-full max-w-xs">
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by name, email, phone, status, source..."
-                  className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-[11px]"
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Filters row */}
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            <div className="flex items-center gap-1 mr-2">
-              <button
-                type="button"
-                onClick={() => setDateQuickFilter("all")}
-                className={`px-2 py-1 rounded-full border text-[11px] ${
-                  dateQuickFilter === "all"
-                    ? "bg-gray-900 text-white border-gray-900"
-                    : "border-gray-300 text-gray-700 hover:bg-gray-50"
-                }`}
-              >
-                All
-              </button>
+                    <button
+                      type="button"
+                      onClick={handleBulkAssign}
+                      disabled={!bulkAssignAgentId || bulkWorking}
+                      className="px-3 py-1.5 rounded-full border border-amber-400 bg-amber-100 text-amber-900 font-medium disabled:opacity-60"
+                    >
+                      {bulkWorking ? "Assigning..." : "Bulk assign"}
+                    </button>
+                  </div>
+                )}
 
               <button
                 type="button"
-                onClick={() => setDateQuickFilter("overdue")}
-                className={`px-2 py-1 rounded-full border text-[11px] ${
-                  dateQuickFilter === "overdue"
-                    ? "bg-rose-600 text-white border-rose-600"
-                    : "border-gray-300 text-gray-700 hover:bg-rose-50"
-                }`}
+                onClick={handleBulkDelete}
+                disabled={bulkWorking}
+                className="px-3 py-1.5 rounded-full border border-red-300 bg-red-50 text-red-700 font-medium disabled:opacity-60"
               >
-                Overdue
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setDateQuickFilter("thisWeek")}
-                className={`px-2 py-1 rounded-full border text-[11px] ${
-                  dateQuickFilter === "thisWeek"
-                    ? "bg-amber-500 text-white border-amber-500"
-                    : "border-gray-300 text-gray-700 hover:bg-amber-50"
-                }`}
-              >
-                Next 7 days
+                {bulkWorking ? "Working..." : "Delete selected"}
               </button>
             </div>
+          )}
 
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-2 py-1"
-            >
-              <option value="">All statuses</option>
-              {Object.entries(STATUS_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
+          {/* Leads table */}
+          <VirtualAdminLeadGrid
+            leads={sortedLeads}
+            loading={loading}
+            dense={dense}
+            selectedLeadIds={selectedLeadIds}
+            onToggleSelectAll={toggleSelectAll}
+            onToggleSelectOne={toggleSelectOne}
+            isAllSelected={
+              sortedLeads.length > 0 &&
+              selectedLeadIds.length === sortedLeads.length
+            }
+            SortHeader={SortHeader}
+            headerPad={headerPad}
+            cellPad={cellPad}
+            formatDate={formatDate}
+            assignableAgents={assignableAgents}
+            handleOpenAssign={handleOpenAssign}
+            handleCopyAgentLink={handleCopyAgentLink}
+            handleEmailAgent={handleEmailAgent}
+            actionItemDrafts={actionItemDrafts}
+            handleActionItemChange={handleActionItemChange}
+            handleSaveActionItem={handleSaveActionItem}
+            savingActionItemId={savingActionItemId}
+            lastSavedActionItemId={lastSavedActionItemId}
+            handleDeleteLead={handleDeleteLead}
+            formatDateTimeFromMillis={formatDateTimeFromMillis}
+            Link={Link}
+            LeadBadge={LeadBadge}
+            labels={{
+              STATUS_LABELS,
+              LEAD_TYPE_LABELS,
+              RELATIONSHIP_LABELS,
+              URGENCY_LABELS,
+              SOURCE_LABELS,
+            }}
+            onOpenLead={(id) => navigate(`/admin/lead/${encodeURIComponent(id)}`)}
 
-            <select
-              value={sourceFilter}
-              onChange={(e) => setSourceFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-2 py-1"
-            >
-              <option value="">All sources</option>
-              {Object.entries(SOURCE_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={relationshipFilter}
-              onChange={(e) => setRelationshipFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-2 py-1"
-            >
-              <option value="">All relationship ranks</option>
-              {Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={urgencyFilter}
-              onChange={(e) => setUrgencyFilter(e.target.value)}
-              className="border border-gray-300 rounded-lg px-2 py-1"
-            >
-              <option value="">All urgency levels</option>
-              {Object.entries(URGENCY_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </div>
+          />
         </div>
 
-        {/* Bulk bar */}
-        {selectedLeadIds.length > 0 && (
-          <div className="px-3 py-2 border-b border-gray-200 bg-amber-50 flex flex-wrap items-center gap-3 text-[11px]">
-            <span className="font-semibold text-amber-900">
-              {selectedLeadIds.length} lead(s) selected
-            </span>
-
-            {Array.isArray(assignableAgents) && assignableAgents.length > 0 && (
-              <div className="flex items-center gap-2">
-                <select
-                  value={bulkAssignAgentId}
-                  onChange={(e) => setBulkAssignAgentId(e.target.value)}
-                  className="border border-amber-300 rounded px-2 py-1"
-                >
-                  <option value="">Assign to agent...</option>
-                  {assignableAgents.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {(a.fullName || a.email || "Unnamed user") +
-                        (a.email ? ` (${a.email})` : "")}
-                    </option>
-                  ))}
-                </select>
+        {/* New Lead Modal */}
+        {showNew && (
+          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-40">
+            <div className="bg-white rounded-xl shadow-xl border border-gray-200 max-w-2xl w-full mx-4 p-4 sm:p-6">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-900">New lead</h2>
                 <button
                   type="button"
-                  onClick={handleBulkAssign}
-                  disabled={!bulkAssignAgentId || bulkWorking}
-                  className="px-3 py-1.5 rounded-full border border-amber-400 bg-amber-100 text-amber-900 font-medium disabled:opacity-60"
+                  onClick={() => setShowNew(false)}
+                  className="text-xs text-gray-500 hover:text-gray-800"
                 >
-                  {bulkWorking ? "Assigning..." : "Bulk assign"}
+                  ✕ Close
                 </button>
               </div>
-            )}
 
-            <button
-              type="button"
-              onClick={handleBulkDelete}
-              disabled={bulkWorking}
-              className="px-3 py-1.5 rounded-full border border-red-300 bg-red-50 text-red-700 font-medium disabled:opacity-60"
-            >
-              {bulkWorking ? "Working..." : "Delete selected"}
-            </button>
+              <div className="mb-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                <h3 className="text-xs font-semibold text-gray-700 mb-2">
+                  Assign agent (optional)
+                </h3>
+
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                  <select
+                    value={newLeadAssignedAgentId}
+                    onChange={(e) =>
+                      setNewLeadAssignedAgentId(e.target.value)
+                    }
+                    className="w-full sm:w-1/2 border border-gray-300 rounded px-2 py-1.5 text-[11px]"
+                  >
+                    <option value="">-- Leave unassigned --</option>
+                    {Array.isArray(assignableAgents) &&
+                      assignableAgents.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {(a.fullName || a.email || "Unnamed user") +
+                            (a.email ? ` (${a.email})` : "")}
+                        </option>
+                      ))}
+                  </select>
+
+                  <div className="text-[11px] text-gray-600">
+                    {newLeadAssignedAgentId
+                      ? (() => {
+                          const a =
+                            Array.isArray(assignableAgents) &&
+                            assignableAgents.find(
+                              (ag) => ag.id === newLeadAssignedAgentId
+                            );
+                          if (!a) return null;
+                          return (
+                            <>
+                              <div className="font-medium">
+                                {a.fullName || a.email || "Unnamed user"}
+                              </div>
+                              {a.email && (
+                                <div className="text-blue-700">{a.email}</div>
+                              )}
+                            </>
+                          );
+                        })()
+                      : "No agent selected yet."}
+                  </div>
+                </div>
+              </div>
+
+              <LeadFormAdmin onSave={handleCreateLead} saving={saving} />
+            </div>
           </div>
         )}
 
-        {/* Leads table */}
-        {/* Leads table */}
-<VirtualAdminLeadGrid
-  leads={sortedLeads}
-  loading={loading}
-  allLeadsCount={leads.length}
-  filteredCount={filteredLeads.length}
-  dense={dense}
-  selectedLeadIds={selectedLeadIds}
-  onToggleSelectAll={toggleSelectAll}
-  onToggleSelectOne={toggleSelectOne}
-  isAllSelected={sortedLeads.length > 0 && selectedLeadIds.length === sortedLeads.length}
-  SortHeader={SortHeader}
-  headerPad={headerPad}
-  cellPad={cellPad}
-  formatDate={formatDate}
-  assignableAgents={assignableAgents}
-  handleOpenAssign={handleOpenAssign}
-  handleCopyAgentLink={handleCopyAgentLink}
-  handleEmailAgent={handleEmailAgent}
-  actionItemDrafts={actionItemDrafts}
-  handleActionItemChange={handleActionItemChange}
-  handleSaveActionItem={handleSaveActionItem}
-  savingActionItemId={savingActionItemId}
-  lastSavedActionItemId={lastSavedActionItemId}
-  handleDeleteLead={handleDeleteLead}
-  formatDateTimeFromMillis={formatDateTimeFromMillis}
-  Link={Link}
-  LeadBadge={LeadBadge}
-  labels={{ STATUS_LABELS, LEAD_TYPE_LABELS, RELATIONSHIP_LABELS, URGENCY_LABELS, SOURCE_LABELS }}
-/>
-
-
-      </div>
-
-      {/* New Lead Modal */}
-      {showNew && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-40">
-          <div className="bg-white rounded-xl shadow-xl border border-gray-200 max-w-2xl w-full mx-4 p-4 sm:p-6">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-gray-900">
-                New lead
-              </h2>
-              <button
-                type="button"
-                onClick={() => setShowNew(false)}
-                className="text-xs text-gray-500 hover:text-gray-800"
-              >
-                ✕ Close
-              </button>
-            </div>
-
-            <div className="mb-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
-              <h3 className="text-xs font-semibold text-gray-700 mb-2">
-                Assign agent (optional)
-              </h3>
-
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                <select
-                  value={newLeadAssignedAgentId}
-                  onChange={(e) => setNewLeadAssignedAgentId(e.target.value)}
-                  className="w-full sm:w-1/2 border border-gray-300 rounded px-2 py-1.5 text-[11px]"
-                >
-                  <option value="">-- Leave unassigned --</option>
-                  {Array.isArray(assignableAgents) &&
-                   assignableAgents.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {(a.fullName || a.email || "Unnamed user") +
-                          (a.email ? ` (${a.email})` : "")}
-                      </option>
-                    ))}
-                </select>
-
-                <div className="text-[11px] text-gray-600">
-                  {newLeadAssignedAgentId
-                    ? (() => {
-                        const a =
-                          Array.isArray(assignableAgents) &&
-                          assignableAgents.find(
-                            (ag) => ag.id === newLeadAssignedAgentId
-                          );
-                        if (!a) return null;
-                        return (
-                          <>
-                            <div className="font-medium">
-                              {a.fullName || a.email || "Unnamed user"}
-                            </div>
-                            {a.email && (
-                              <div className="text-blue-700">
-                                {a.email}
-                              </div>
-                            )}
-                          </>
-                        );
-                      })()
-                    : "No agent selected yet."}
-                </div>
-              </div>
-            </div>
-
-            <LeadFormAdmin onSave={handleCreateLead} saving={saving} />
-          </div>
-        </div>
-      )}
-
-      {/* Assign Agent Modal */}
-      {assigningLead && (
-    <AssignAgentModal
-  lead={assigningLead}
-  agents={assignableAgents || []}
-  assigning={assigning}
-  onClose={handleCloseAssign}
-  onAssign={handleAssignSave}
-/>
-
-      )}
-{agentLeadsOpen && agentLeadsTarget && (
-  <AgentLeadsModal
-    target={agentLeadsTarget}
-    leads={leads}
-    onClose={() => {
-      setAgentLeadsOpen(false);
-      setAgentLeadsTarget(null);
-    }}
-    onOpenLead={(id) => navigate(`/admin/lead/${id}`)}
+        {/* Assign Agent Modal */}
+    {assigningLead && (
+  <AssignAgentModal
+    lead={assigningLead}
+    agents={assignableAgents || []}
+    assigning={assigning}
+    onClose={handleCloseAssign}
+    onAssign={handleAssignSave}
+    onAssignAdd={handleAssignAdd}
+    onAssignRemove={handleAssignRemove}
   />
 )}
 
-      {/* Email Agent Modal */}
-      {emailLead && (
-        <EmailAgentModal lead={emailLead} onClose={() => setEmailLead(null)} />
-      )}
 
-      {/* CSV Preview Modal */}
-      {csvPreviewOpen &&
-        csvPreview &&
-        (() => {
-          const { headers, rows } = csvPreview;
-          const lowerHeaders = headers.map((h) => h.toLowerCase());
-
-          const findIdx = (candidates) =>
-            lowerHeaders.findIndex((h) => candidates.includes(h));
-
-          // NAME
-          const fullNameIdx = findIdx([
-            "full name",
-            "name",
-            "fullname",
-            "contact name",
-          ]);
-          const firstNameIdx = findIdx([
-            "first name",
-            "firstname",
-            "first",
-          ]);
-          const lastNameIdx = findIdx(["last name", "lastname", "last"]);
-
-          // PHONE (includes Zillow "phone (mobile)")
-          const phoneIdx = findIdx([
-            "phone",
-            "phone number",
-            "primary phone",
-            "mobile",
-            "cell",
-            "cell phone",
-            "home phone",
-            "work phone",
-            "phone (mobile)", // Zillow
-          ]);
-
-          // EMAIL (includes Zillow "email (personal)")
-          const emailIdx = findIdx([
-            "email",
-            "e-mail",
-            "email address",
-            "e-mail address",
-            "email (personal)", // Zillow
-          ]);
-
-          // SOURCE
-          const sourceIdx = findIdx([
-            "source",
-            "lead source",
-            "source name",
-          ]);
-
-          // REGISTERED / CREATE DATE (Zillow "create date")
-          const registrationIdx = findIdx([
-            "registration date",
-            "registered",
-            "date registered",
-            "reg date",
-            "create date", // Zillow
-          ]);
-
-          // NOTES (include Zillow "note")
-          const notesIdx = findIdx([
-            "agent notes",
-            "agent note",
-            "note", // Zillow
-            "notes",
-            "comments",
-          ]);
+        {/* Agent Leads Modal */}
+        {agentLeadsOpen && agentLeadsTarget && (
+  <AgentLeadsModal
+  target={agentLeadsTarget}
+  leads={leads}
+  leadsForAgent={leadsForAgent}
+  onClose={() => {
+    setAgentLeadsOpen(false);
+    setAgentLeadsTarget(null);
+  }}
+  onOpenLead={(id) => navigate(`/admin/lead/${encodeURIComponent(id)}`)}
+/>
 
 
-          function getName(cols) {
-            let firstName = "";
-            let lastName = "";
+        )}
 
-            if (fullNameIdx >= 0 && cols[fullNameIdx]) {
-              const parts = cols[fullNameIdx].split(" ");
-              firstName = parts[0] || "";
-              lastName = parts.slice(1).join(" ") || "";
-            } else {
-              if (firstNameIdx >= 0 && cols[firstNameIdx]) {
-                firstName = cols[firstNameIdx];
+        {/* Email Agent Modal */}
+        {emailLead && (
+          <EmailAgentModal lead={emailLead} onClose={() => setEmailLead(null)} />
+        )}
+
+        {/* CSV Preview Modal */}
+        {csvPreviewOpen &&
+          csvPreview &&
+          (() => {
+            const { headers, rows } = csvPreview;
+            const lowerHeaders = headers.map((h) => h.toLowerCase());
+
+            const findIdx = (candidates) =>
+              lowerHeaders.findIndex((h) => candidates.includes(h));
+
+            const fullNameIdx = findIdx([
+              "full name",
+              "name",
+              "fullname",
+              "contact name",
+            ]);
+            const firstNameIdx = findIdx(["first name", "firstname", "first"]);
+            const lastNameIdx = findIdx(["last name", "lastname", "last"]);
+
+            const phoneIdx = findIdx([
+              "phone",
+              "phone number",
+              "primary phone",
+              "mobile",
+              "cell",
+              "cell phone",
+              "home phone",
+              "work phone",
+              "phone (mobile)",
+            ]);
+
+            const emailIdx = findIdx([
+              "email",
+              "e-mail",
+              "email address",
+              "e-mail address",
+              "email (personal)",
+            ]);
+
+            const sourceIdx = findIdx(["source", "lead source", "source name"]);
+
+            const registrationIdx = findIdx([
+              "registration date",
+              "registered",
+              "date registered",
+              "reg date",
+              "create date",
+            ]);
+
+            const notesIdx = findIdx([
+              "agent notes",
+              "agent note",
+              "note",
+              "notes",
+              "comments",
+            ]);
+
+            function getName(cols) {
+              let firstName = "";
+              let lastName = "";
+
+              if (fullNameIdx >= 0 && cols[fullNameIdx]) {
+                const parts = cols[fullNameIdx].split(" ");
+                firstName = parts[0] || "";
+                lastName = parts.slice(1).join(" ") || "";
+              } else {
+                if (firstNameIdx >= 0 && cols[firstNameIdx]) {
+                  firstName = cols[firstNameIdx];
+                }
+                if (lastNameIdx >= 0 && cols[lastNameIdx]) {
+                  lastName = cols[lastNameIdx];
+                }
               }
-              if (lastNameIdx >= 0 && cols[lastNameIdx]) {
-                lastName = cols[lastNameIdx];
-              }
+
+              const full = `${firstName} ${lastName}`.trim();
+              if (full) return full;
+              return cols.find((c) => c && c.trim()) || "";
             }
 
-            const full = `${firstName} ${lastName}`.trim();
-            if (full) return full;
-
-            return cols.find((c) => c && c.trim()) || "";
-          }
-
-          function getEmail(cols) {
-            if (emailIdx >= 0 && cols[emailIdx]) return cols[emailIdx];
-            const candidate = cols.find((c) => c && c.includes("@"));
-            return candidate || "";
-          }
-
-          function getPhone(cols) {
-            if (phoneIdx >= 0 && cols[phoneIdx]) return cols[phoneIdx];
-            const candidate = cols.find(
-              (c) => c && /\d/.test(c) && c.replace(/\D/g, "").length >= 7
-            );
-            return candidate || "";
-          }
-
-          function getSource(cols) {
-            if (sourceIdx >= 0 && cols[sourceIdx]) return cols[sourceIdx];
-            return "import-csv";
-          }
-
-          function getRegistration(cols) {
-            if (registrationIdx >= 0 && cols[registrationIdx]) {
-              const raw = cols[registrationIdx].trim();
-              if (!raw) return "";
-
-              const d = new Date(raw);
-              if (!Number.isNaN(d.getTime())) {
-                return d.toISOString().split("T")[0];
-              }
-              return raw;
+            function getEmail(cols) {
+              if (emailIdx >= 0 && cols[emailIdx]) return cols[emailIdx];
+              const candidate = cols.find((c) => c && c.includes("@"));
+              return candidate || "";
             }
-            return "";
-          }
 
-          function getNotes(cols) {
-            if (notesIdx >= 0 && cols[notesIdx]) return cols[notesIdx];
-            return "";
-          }
+            function getPhone(cols) {
+              if (phoneIdx >= 0 && cols[phoneIdx]) return cols[phoneIdx];
+              const candidate = cols.find(
+                (c) => c && /\d/.test(c) && c.replace(/\D/g, "").length >= 7
+              );
+              return candidate || "";
+            }
 
-          let rowsToRender = rows;
+            function getSource(cols) {
+              if (sourceIdx >= 0 && cols[sourceIdx]) return cols[sourceIdx];
+              return "import-csv";
+            }
 
-          if (csvSort.field === "registered") {
-            rowsToRender = [...rows].sort((a, b) => {
-              const aReg = getRegistration(a.cols) || "";
-              const bReg = getRegistration(b.cols) || "";
+            function getRegistration(cols) {
+              if (registrationIdx >= 0 && cols[registrationIdx]) {
+                const raw = cols[registrationIdx].trim();
+                if (!raw) return "";
 
-              const aTime = Date.parse(aReg);
-              const bTime = Date.parse(bReg);
-
-              if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
-                return csvSort.direction === "asc"
-                  ? aTime - bTime
-                  : bTime - aTime;
+                const d = new Date(raw);
+                if (!Number.isNaN(d.getTime())) {
+                  return d.toISOString().split("T")[0];
+                }
+                return raw;
               }
+              return "";
+            }
 
-              if (aReg < bReg)
-                return csvSort.direction === "asc" ? -1 : 1;
-              if (aReg > bReg)
-                return csvSort.direction === "asc" ? 1 : -1;
-              return 0;
-            });
-          }
+            function getNotes(cols) {
+              if (notesIdx >= 0 && cols[notesIdx]) return cols[notesIdx];
+              return "";
+            }
 
-          return (
-            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-              <div className="bg-white rounded-xl shadow-xl border border-gray-200 max-w-4xl w-full mx-4 p-4 text-xs">
-                <div className="flex items-center justify-between mb-3">
-                  <h2 className="text-sm font-semibold text-gray-900">
-                    CSV preview – select rows to import
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCsvPreviewOpen(false);
-                      setCsvPreview(null);
-                      setCsvSelectedRowIds([]);
-                      setCsvSort({ field: null, direction: "asc" });
-                    }}
-                    className="text-[11px] text-gray-500 hover:text-gray-800"
-                  >
-                    ✕ Close
-                  </button>
-                </div>
+            let rowsToRender = rows;
 
-                <div className="mb-2 text-[11px] text-gray-600">
-                  Showing only the columns that will be imported:
-                  <span className="font-semibold">
-                    {" "}
-                    Name, Email, Phone, Source, Registered, Agent notes
-                  </span>
-                  .
-                </div>
+            if (csvSort.field === "registered") {
+              rowsToRender = [...rows].sort((a, b) => {
+                const aReg = getRegistration(a.cols) || "";
+                const bReg = getRegistration(b.cols) || "";
 
-                <div className="border border-gray-200 rounded-lg max-h-80 overflow-x-auto overflow-y-auto">
-  <table className="min-w-[900px] text-[11px]">
+                const aTime = Date.parse(aReg);
+                const bTime = Date.parse(bReg);
 
-                    <thead className="bg-gray-50 border-b border-gray-200">
-                      <tr className="text-gray-600">
-                        <th className="px-2 py-1 text-left">
-                          <input
-                            type="checkbox"
-                            checked={
-                              rows.length > 0 &&
-                              csvSelectedRowIds.length === rows.length
-                            }
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setCsvSelectedRowIds(rows.map((r) => r.id));
-                              } else {
-                                setCsvSelectedRowIds([]);
-                              }
-                            }}
-                          />
-                        </th>
-                        <th className="px-2 py-1 text-left">Name</th>
-                        <th className="px-2 py-1 text-left">Email</th>
-                        <th className="px-2 py-1 text-left">Phone</th>
-                        <th className="px-2 py-1 text-left">Source</th>
-                        <th
-                          className={`px-2 py-1 text-left cursor-pointer select-none`}
-                          onClick={() =>
-                            setCsvSort((prev) => ({
-                              field: "registered",
-                              direction:
-                                prev.field === "registered" &&
-                                prev.direction === "asc"
-                                  ? "desc"
-                                  : "asc",
-                            }))
-                          }
-                        >
-                          Registered
-                          {csvSort.field === "registered" && (
-                            <span className="ml-1 text-[10px]">
-                              {csvSort.direction === "asc" ? "▲" : "▼"}
-                            </span>
-                          )}
-                        </th>
-                        <th className="px-2 py-1 text-left">Agent notes</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rowsToRender.map((row) => {
-                        const cols = row.cols;
-                        const checked = csvSelectedRowIds.includes(row.id);
-                        return (
-                          <tr
-                            key={row.id}
-                            className={`border-b border-gray-100 ${
-                              checked ? "bg-amber-50" : ""
-                            }`}
-                          >
-                            <td className="px-2 py-1 align-top">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleCsvRow(row.id)}
-                              />
-                            </td>
-                            <td className="px-2 py-1 align-top">
-                              {getName(cols)}
-                            </td>
-                            <td className="px-2 py-1 align-top">
-                              {getEmail(cols)}
-                            </td>
-                            <td className="px-2 py-1 align-top">
-                              {getPhone(cols)}
-                            </td>
-                            <td className="px-2 py-1 align-top">
-                              {getSource(cols)}
-                            </td>
-                            <td className="px-2 py-1 align-top">
-                              {getRegistration(cols)}
-                            </td>
-                            <td className="px-2 py-1 align-top max-w-xs truncate">
-                              {getNotes(cols)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
+                  return csvSort.direction === "asc"
+                    ? aTime - bTime
+                    : bTime - aTime;
+                }
 
-                <div className="mt-3 flex items-center justify-between">
-                  <div className="text-[11px] text-gray-600">
-                    Selected rows:{" "}
-                    <span className="font-semibold">
-                      {csvSelectedRowIds.length}
-                    </span>
+                if (aReg < bReg) return csvSort.direction === "asc" ? -1 : 1;
+                if (aReg > bReg) return csvSort.direction === "asc" ? 1 : -1;
+                return 0;
+              });
+            }
+
+            return (
+              <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+                <div className="bg-white rounded-xl shadow-xl border border-gray-200 max-w-4xl w-full mx-4 p-4 text-xs">
+                  <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-sm font-semibold text-gray-900">
+                      CSV preview – select rows to import
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCsvPreviewOpen(false);
+                        setCsvPreview(null);
+                        setCsvSelectedRowIds([]);
+                        setCsvSort({ field: null, direction: "asc" });
+                      }}
+                      className="text-[11px] text-gray-500 hover:text-gray-800"
+                    >
+                      ✕ Close
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    disabled={importing || csvSelectedRowIds.length === 0}
-                    onClick={handleConfirmCsvImport}
-                    className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-wrcBlack text-wrcYellow disabled:opacity-60"
-                  >
-                    {importing ? "Importing..." : "Import selected rows"}
-                  </button>
+
+                  <div className="mb-2 text-[11px] text-gray-600">
+                    Showing only the columns that will be imported:
+                    <span className="font-semibold">
+                      {" "}
+                      Name, Email, Phone, Source, Registered, Agent notes
+                    </span>
+                    .
+                  </div>
+
+                  <div className="border border-gray-200 rounded-lg max-h-80 overflow-x-auto overflow-y-auto">
+                    <table className="min-w-[900px] text-[11px]">
+                      <thead className="bg-gray-50 border-b border-gray-200">
+                        <tr className="text-gray-600">
+                          <th className="px-2 py-1 text-left">
+                            <input
+                              type="checkbox"
+                              checked={
+                                rows.length > 0 &&
+                                csvSelectedRowIds.length === rows.length
+                              }
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setCsvSelectedRowIds(rows.map((r) => r.id));
+                                } else {
+                                  setCsvSelectedRowIds([]);
+                                }
+                              }}
+                            />
+                          </th>
+                          <th className="px-2 py-1 text-left">Name</th>
+                          <th className="px-2 py-1 text-left">Email</th>
+                          <th className="px-2 py-1 text-left">Phone</th>
+                          <th className="px-2 py-1 text-left">Source</th>
+                          <th
+                            className="px-2 py-1 text-left cursor-pointer select-none"
+                            onClick={() =>
+                              setCsvSort((prev) => ({
+                                field: "registered",
+                                direction:
+                                  prev.field === "registered" &&
+                                  prev.direction === "asc"
+                                    ? "desc"
+                                    : "asc",
+                              }))
+                            }
+                          >
+                            Registered
+                            {csvSort.field === "registered" && (
+                              <span className="ml-1 text-[10px]">
+                                {csvSort.direction === "asc" ? "▲" : "▼"}
+                              </span>
+                            )}
+                          </th>
+                          <th className="px-2 py-1 text-left">Agent notes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rowsToRender.map((row) => {
+                          const cols = row.cols;
+                          const checked = csvSelectedRowIds.includes(row.id);
+                          return (
+                            <tr
+                              key={row.id}
+                              className={`border-b border-gray-100 ${
+                                checked ? "bg-amber-50" : ""
+                              }`}
+                            >
+                              <td className="px-2 py-1 align-top">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleCsvRow(row.id)}
+                                />
+                              </td>
+                              <td className="px-2 py-1 align-top">
+                                {getName(cols)}
+                              </td>
+                              <td className="px-2 py-1 align-top">
+                                {getEmail(cols)}
+                              </td>
+                              <td className="px-2 py-1 align-top">
+                                {getPhone(cols)}
+                              </td>
+                              <td className="px-2 py-1 align-top">
+                                {getSource(cols)}
+                              </td>
+                              <td className="px-2 py-1 align-top">
+                                {getRegistration(cols)}
+                              </td>
+                              <td className="px-2 py-1 align-top max-w-xs truncate">
+                                {getNotes(cols)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className="text-[11px] text-gray-600">
+                      Selected rows:{" "}
+                      <span className="font-semibold">
+                        {csvSelectedRowIds.length}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={importing || csvSelectedRowIds.length === 0}
+                      onClick={handleConfirmCsvImport}
+                      className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-wrcBlack text-wrcYellow disabled:opacity-60"
+                    >
+                      {importing ? "Importing..." : "Import selected rows"}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          );
-        })()}
+            );
+          })()}
+      </div>
     </div>
-  );
+  </div>
+);
+
 }
 function VirtualAdminLeadGrid({
   leads,
@@ -3099,43 +4227,60 @@ function VirtualAdminLeadGrid({
   Link,
   LeadBadge,
   labels,
+  onOpenLead,
 }) {
   const parentRef = React.useRef(null);
 
   const rowVirtualizer = useVirtualizer({
     count: leads.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => (dense ? 56 : 74), // tweak if needed
+    estimateSize: () => (dense ? 56 : 74),
     overscan: 12,
   });
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const totalSize = rowVirtualizer.getTotalSize();
 
-  // Sticky column widths (match your old sticky layout)
-  const CHECK_W = 44;     // checkbox col
-  const NAME_W = 300;     // name col
-  const CONTACT_W = 240;  // contact col
+  // --- Column widths (tweak as needed) ---
+  const COL = {
+    check: 44,
+    name: 300,
+    contact: 240,
+    status: 140,
+    type: 110,
+    rel: 150,
+    urg: 140,
+    source: 160,
+    reg: 140,
+    due: 140,
+    agent: 220,
+    action: 320,
+    activity: 360,
+    del: 110,
+  };
 
-  // Other columns
-  const STATUS_W = 140;
-  const TYPE_W = 110;
-  const REL_W = 150;
-  const URG_W = 140;
-  const SOURCE_W = 160;
-  const REG_W = 140;
-  const DUE_W = 140;
-  const AGENT_W = 220;
-  const ACTION_W = 320;
-  const ACTIVITY_W = 360;
-  const DELETE_W = 110;
+  const gridTemplateColumns = Object.values(COL).map((w) => `${w}px`).join(" ");
+  const MIN_TABLE_W = Object.values(COL).reduce((a, b) => a + b, 0);
 
-  const gridTemplateColumns = `${CHECK_W}px ${NAME_W}px ${CONTACT_W}px ${STATUS_W}px ${TYPE_W}px ${REL_W}px ${URG_W}px ${SOURCE_W}px ${REG_W}px ${DUE_W}px ${AGENT_W}px ${ACTION_W}px ${ACTIVITY_W}px ${DELETE_W}px`;
+  const LEFT = {
+    check: 0,
+    name: COL.check,
+    contact: COL.check + COL.name,
+  };
 
   const headerCell =
-    `px-3 ${headerPad} text-[11px] uppercase tracking-wide text-gray-500 border-b border-gray-200 bg-gray-50`;
+    `px-3 ${headerPad} text-[11px] uppercase tracking-wide text-gray-500 ` +
+    `border-b border-gray-200 bg-gray-50`;
+
   const cell =
     `px-3 ${cellPad} text-[11px] border-b border-gray-100 bg-white`;
+
+  const clamp2Style = () => ({
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+    overflow: "hidden",
+  });
 
   const {
     STATUS_LABELS,
@@ -3145,31 +4290,41 @@ function VirtualAdminLeadGrid({
     SOURCE_LABELS,
   } = labels;
 
+  const openLead = (leadId) => {
+    const sel = window.getSelection?.()?.toString();
+    if (sel) return; // don’t open lead if user is highlighting text
+    onOpenLead?.(leadId);
+  };
+
   return (
     <div className="max-h-[70vh] overflow-auto" ref={parentRef}>
-      {/* Header row (sticky) */}
+      {/* Sticky header */}
       <div
-        className="sticky top-0 z-30"
-        style={{ display: "grid", gridTemplateColumns, minWidth: 1600 }}
+        className="sticky top-0 z-50"
+        style={{ display: "grid", gridTemplateColumns, minWidth: MIN_TABLE_W }}
       >
-        <div className={`${headerCell} sticky left-0 z-40`}>
+        {/* Check (sticky) */}
+        <div className={`${headerCell}  z-[60] bg-gray-50 border-r border-gray-200`}>
           <input
             type="checkbox"
             checked={isAllSelected}
             onChange={onToggleSelectAll}
+            onClick={(e) => e.stopPropagation()}
           />
         </div>
 
+        {/* Name (sticky) */}
         <div
-          className={`${headerCell} sticky z-40`}
-          style={{ left: CHECK_W }}
+          className={`${headerCell} sticky z-[60] bg-gray-50 border-r border-gray-200`}
+          // style={{ left: LEFT.name }}
         >
           <SortHeader label="Name" field="name" />
         </div>
 
+        {/* Contact (sticky) */}
         <div
-          className={`${headerCell} sticky z-40`}
-          style={{ left: CHECK_W + NAME_W }}
+          className={`${headerCell} sticky z-[60] bg-gray-50 border-r border-gray-200`}
+          // style={{ left: LEFT.contact }}
         >
           Contact
         </div>
@@ -3204,8 +4359,7 @@ function VirtualAdminLeadGrid({
       </div>
 
       {/* Virtualized body spacer */}
-      <div style={{ height: totalSize, position: "relative", minWidth: 1600 }}>
-        {/* Empty states */}
+      <div style={{ height: totalSize, position: "relative", minWidth: MIN_TABLE_W }}>
         {!loading && leads.length === 0 && (
           <div className="p-6 text-xs text-gray-500">No leads yet.</div>
         )}
@@ -3216,7 +4370,13 @@ function VirtualAdminLeadGrid({
           return (
             <div
               key={lead.id}
-              className="hover:bg-gray-50"
+              role="button"
+              tabIndex={0}
+              onClick={() => openLead(lead.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") openLead(lead.id);
+              }}
+              className="group cursor-pointer hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-black/10"
               style={{
                 position: "absolute",
                 top: 0,
@@ -3228,23 +4388,46 @@ function VirtualAdminLeadGrid({
               }}
             >
               {/* Checkbox (sticky) */}
-              <div className={`${cell} sticky left-0 z-20`}>
+              <div
+                className={`${cell} z-40 bg-white group-hover:bg-gray-50 border-r border-gray-200`}
+              >
                 <input
                   type="checkbox"
                   checked={selectedLeadIds.includes(lead.id)}
-                  onChange={() => onToggleSelectOne(lead.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    onToggleSelectOne(lead.id);
+                  }}
                 />
               </div>
 
               {/* Name (sticky) */}
-              <div className={`${cell} sticky z-20`} style={{ left: CHECK_W }}>
+              <div
+                className={`${cell} bg-white group-hover:bg-gray-50 border-r border-gray-200`}
+                // style={{ left: LEFT.name }}
+              >
                 <div className="font-medium text-xs text-gray-900 whitespace-nowrap">
-                  <Link
-                    to={`/admin/lead/${lead.id}`}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+
+  console.log(
+      "Clicked lead:",
+      lead.id,
+      lead.firstName,
+      lead.lastName,
+      lead
+    );
+
+
+                      openLead(lead.id);
+                    }}
                     className="text-blue-700 hover:underline"
                   >
                     {lead.firstName} {lead.lastName}
-                  </Link>
+                  </button>
                 </div>
                 <div className="text-[11px] text-gray-500">
                   Created: {formatDate(lead.createdAt)}
@@ -3253,19 +4436,26 @@ function VirtualAdminLeadGrid({
 
               {/* Contact (sticky) */}
               <div
-                className={`${cell} sticky z-20`}
-                style={{ left: CHECK_W + NAME_W }}
+               className={`${cell} sticky z-40 bg-white group-hover:bg-gray-50 border-r border-gray-200`}
+                // style={{ left: LEFT.contact }}
               >
-                {lead.phone && <div>{lead.phone}</div>}
-                {lead.email && <div className="text-blue-700">{lead.email}</div>}
+                <div className="space-y-0.5">
+                  <div className="text-[11px] text-gray-800 truncate">
+                    {lead.phone ? `📞 ${lead.phone}` : <span className="text-gray-400 italic">No phone</span>}
+                  </div>
+                  <div className="text-[11px] truncate">
+                    {lead.email ? (
+                      <span className="text-blue-700">✉️ {lead.email}</span>
+                    ) : (
+                      <span className="text-gray-400 italic">No email</span>
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Status */}
               <div className={cell}>
-                <LeadBadge
-                  value={lead.status}
-                  label={STATUS_LABELS[lead.status] || lead.status}
-                />
+                <LeadBadge value={lead.status} label={STATUS_LABELS[lead.status] || lead.status} />
               </div>
 
               {/* Type */}
@@ -3277,10 +4467,7 @@ function VirtualAdminLeadGrid({
               <div className={cell}>
                 <LeadBadge
                   value={lead.relationshipRanking}
-                  label={
-                    RELATIONSHIP_LABELS[lead.relationshipRanking] ||
-                    lead.relationshipRanking
-                  }
+                  label={RELATIONSHIP_LABELS[lead.relationshipRanking] || lead.relationshipRanking}
                 />
               </div>
 
@@ -3300,9 +4487,7 @@ function VirtualAdminLeadGrid({
               {/* Reg date */}
               <div className={cell}>
                 {lead.registeredDateRaw ? (
-                  <span className="text-gray-800">
-                    {formatDate(lead.registeredDateRaw)}
-                  </span>
+                  <span className="text-gray-800">{formatDate(lead.registeredDateRaw)}</span>
                 ) : (
                   <span className="text-gray-400 italic">No Registered Date</span>
                 )}
@@ -3336,23 +4521,27 @@ function VirtualAdminLeadGrid({
               <div className={cell}>
                 {lead.assignedAgentName ? (
                   <>
-                    <div className="font-medium text-gray-900">
-                      {lead.assignedAgentName}
-                    </div>
+                    <div className="font-medium text-gray-900">{lead.assignedAgentName}</div>
                     {lead.assignedAgentEmail && (
                       <div className="text-blue-700">{lead.assignedAgentEmail}</div>
                     )}
                     <div className="mt-1 flex flex-wrap gap-2">
                       <button
                         type="button"
-                        onClick={() => handleCopyAgentLink(lead)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCopyAgentLink(lead);
+                        }}
                         className="px-2 py-1 border border-gray-300 rounded-full text-[10px] text-gray-700 hover:bg-gray-50"
                       >
                         Copy agent link
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleEmailAgent(lead)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEmailAgent(lead);
+                        }}
                         className="px-2 py-1 border border-gray-300 rounded-full text-[10px] text-gray-700 hover:bg-gray-50"
                       >
                         Email link
@@ -3365,7 +4554,10 @@ function VirtualAdminLeadGrid({
                     <div className="mt-1">
                       <button
                         type="button"
-                        onClick={() => handleOpenAssign(lead)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenAssign(lead);
+                        }}
                         className="px-2 py-1 border border-gray-300 rounded-full text-[10px] text-gray-700 hover:bg-gray-50"
                       >
                         Assign
@@ -3374,6 +4566,24 @@ function VirtualAdminLeadGrid({
                   </div>
                 )}
               </div>
+{Array.isArray(lead.assignedAgents) && lead.assignedAgents.length > 0 && (
+  <div className="mt-2 flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
+    {lead.assignedAgents.slice(0, 4).map((a) => (
+      <span
+        key={a.id}
+        className="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] text-gray-700"
+        title={a.email || ""}
+      >
+        {a.name || a.email}
+      </span>
+    ))}
+    {lead.assignedAgents.length > 4 && (
+      <span className="text-[10px] text-gray-500">
+        +{lead.assignedAgents.length - 4} more
+      </span>
+    )}
+  </div>
+)}
 
               {/* Action item */}
               <div className={cell}>
@@ -3382,12 +4592,19 @@ function VirtualAdminLeadGrid({
                   className="w-full border border-gray-300 rounded px-2 py-1 text-[11px]"
                   placeholder="Action item for agent..."
                   value={actionItemDrafts[lead.id] ?? lead.actionItem ?? ""}
-                  onChange={(e) => handleActionItemChange(lead.id, e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    handleActionItemChange(lead.id, e.target.value);
+                  }}
                 />
                 <div className="mt-1 flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => handleSaveActionItem(lead)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSaveActionItem(lead);
+                    }}
                     disabled={savingActionItemId === lead.id}
                     className="px-2 py-1 border border-gray-300 rounded-full text-[10px] text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                   >
@@ -3402,42 +4619,41 @@ function VirtualAdminLeadGrid({
               {/* Latest activity */}
               <div className={cell}>
                 {(() => {
-                  let latestEntry = null;
-                  let latestTime = 0;
+                  const preferredLatest = lead.latestActivityAdmin || lead.latestActivity;
 
+                  let latestTime = 0;
                   if (Array.isArray(lead.journal)) {
                     for (const entry of lead.journal) {
-                      if (!entry || !entry.text) continue;
-
-                      let ts = 0;
+                      if (!entry) continue;
                       const ca = entry.createdAt;
-
+                      let ts = 0;
                       if (ca?.toMillis) ts = ca.toMillis();
                       else if (ca instanceof Date) ts = ca.getTime();
                       else if (typeof ca === "number") ts = ca;
                       else if (typeof ca === "string") ts = new Date(ca).getTime();
-
-                      if (!isNaN(ts) && ts >= latestTime) {
-                        latestTime = ts;
-                        latestEntry = entry;
-                      }
+                      if (!Number.isNaN(ts) && ts > latestTime) latestTime = ts;
                     }
                   }
 
-                  if (!latestEntry && lead.latestActivity) {
-                    latestEntry = { text: lead.latestActivity };
-                  }
+                  const when = latestTime ? formatDateTimeFromMillis(latestTime) : "";
+                  if (!preferredLatest) return <span className="text-gray-400 italic">No activity yet</span>;
 
-                  if (!latestEntry) return <span className="text-gray-400 italic">No activity yet</span>;
+                  const isAdmin = !!lead.latestActivityAdmin;
 
                   return (
-                    <div className="text-gray-800">
-                      <div>{latestEntry.text}</div>
-                      {latestTime > 0 && (
-                        <div className="text-[10px] text-gray-500 mt-1">
-                          {formatDateTimeFromMillis(latestTime)}
-                        </div>
-                      )}
+                    <div
+                      className="rounded-lg border border-gray-200 bg-gray-50 px-2 py-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`text-[10px] font-semibold ${isAdmin ? "text-gray-900" : "text-gray-700"}`}>
+                          {isAdmin ? "Admin activity" : "Activity"}
+                        </span>
+                        {when ? <span className="text-[10px] text-gray-500">{when}</span> : null}
+                      </div>
+                      <div className="mt-1 text-[11px] text-gray-800" style={clamp2Style()}>
+                        {preferredLatest}
+                      </div>
                     </div>
                   );
                 })()}
@@ -3447,7 +4663,10 @@ function VirtualAdminLeadGrid({
               <div className={cell}>
                 <button
                   type="button"
-                  onClick={() => handleDeleteLead(lead)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteLead(lead);
+                  }}
                   className="px-2 py-1 border border-red-300 text-red-700 rounded-full text-[10px] hover:bg-red-50"
                 >
                   Delete
@@ -3460,34 +4679,36 @@ function VirtualAdminLeadGrid({
     </div>
   );
 }
-function AgentLeadsModal({ target, leads, onClose, onOpenLead }) {
+
+function AgentLeadsModal({ target, leads, leadsForAgent, onClose, onOpenLead }) {
   const [search, setSearch] = React.useState("");
 
   const normalizedSearch = search.trim().toLowerCase();
 
-  const agentLeads = React.useMemo(() => {
-    const rows = (Array.isArray(leads) ? leads : []).filter((l) => {
-      const k = agentKeyForLead(l);
-      return k === target.key;
-    });
+const agentLeads = React.useMemo(() => {
+  const rows = typeof leadsForAgent === "function" ? leadsForAgent(target, leads) : [];
 
-    if (!normalizedSearch) return rows;
+  if (!normalizedSearch) return rows;
 
-    return rows.filter((l) => {
-      const hay = [
-        l.firstName,
-        l.lastName,
-        l.email,
-        l.phone,
-        l.latestActivity,
-        l.journalLastEntry,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(normalizedSearch);
-    });
-  }, [leads, target.key, normalizedSearch]);
+  return rows.filter((l) => {
+    const hay = [
+      l.firstName,
+      l.lastName,
+      l.email,
+      l.phone,
+      l.latestActivity,
+      l.latestActivityAdmin,
+      l.journalLastEntry,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return hay.includes(normalizedSearch);
+  });
+}, [leads, target, normalizedSearch, leadsForAgent]);
+
+
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
@@ -3561,9 +4782,10 @@ function AgentLeadsModal({ target, leads, onClose, onOpenLead }) {
                   </td>
 
                   <td className="px-3 py-2 text-[11px] text-gray-700">
-                    {l.latestActivity || l.journalLastEntry || (
-                      <span className="text-gray-400 italic">No activity yet</span>
-                    )}
+                  {l.latestActivityAdmin || l.latestActivity || l.journalLastEntry || (
+  <span className="text-gray-400 italic">No activity yet</span>
+)}
+
                   </td>
 
                   <td className="px-3 py-2">

@@ -1,101 +1,129 @@
 import React from "react";
 import { Routes, Route, Navigate, Outlet } from "react-router-dom";
 import AppShell from "./components/AppShell";
+import AgentShell from "./components/AgentShell";
 import LoginPage from "./pages/LoginPage";
+import LeadAgreementPage from "./pages/LeadAgreementPage";
+
 import AdminDashboard from "./pages/AdminDashboard";
-import AgentLeadPage from "./pages/AgentLeadPage";
-import { useAuth } from "./contexts/AuthContext";
-import RequireAdmin from "./components/RequireAdmin";
 import AdminLeadPage from "./pages/AdminLeadPage";
 import AgentHomePage from "./pages/AgentHomePage";
+import AgentLeadPage from "./pages/AgentLeadPage";
+// import AgentViewPage from "./pages/AgentViewPage";
 
-function RequireAuth() {
-  const { user, loading } = useAuth();
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-sm text-gray-600">Loading...</div>
-      </div>
-    );
-  }
-  if (!user) return <Navigate to="/login" replace />;
-  return <Outlet />;
-}
+import { useAuth } from "./contexts/AuthContext";
+import RequireAdmin from "./components/RequireAdmin";
+import RequireLeadAgreement from "./components/RequireLeadAgreement";
 
-function RoleRedirect() {
-  const { role } = useAuth();
-  if (role === "admin") return <Navigate to="/admin" replace />;
-  if (role === "agent") return <Navigate to="/agent" replace />;
+function LoadingScreen({ text = "Loading..." }) {
   return (
-    <div className="text-sm text-gray-600">
-      No role set for this user.
+    <div className="min-h-screen flex items-center justify-center bg-gray-100">
+      <div className="text-sm text-gray-600">{text}</div>
     </div>
   );
 }
 
+function RequireAuth() {
+  const { user, loading } = useAuth();
+  if (loading) return <LoadingScreen />;
+  if (!user) return <Navigate to="/login" replace />;
+  return <Outlet />;
+}
+
+function RequireAgent() {
+  const { user, loading, role } = useAuth();
+
+  if (loading) return <LoadingScreen />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!role) return <LoadingScreen text="Loading role..." />;
+
+  if (role === "admin") return <Navigate to="/admin" replace />;
+  if (role !== "agent") return <Navigate to="/" replace />;
+
+  return <Outlet />;
+}
+
+function RoleRedirect() {
+  const { user, loading, role } = useAuth();
+
+  if (loading) return <LoadingScreen />;
+  if (!user) return <Navigate to="/login" replace />;
+
+  if (role === "admin") return <Navigate to="/admin" replace />;
+  if (role === "agent") return <Navigate to="/agent" replace />;
+
+  return <div className="text-sm text-gray-600">No role set for this user.</div>;
+}
 
 export default function App() {
   return (
     <Routes>
+      {/* Public */}
       <Route path="/login" element={<LoginPage />} />
 
+      {/* Signed-in */}
       <Route element={<RequireAuth />}>
-      <Route
-  path="/agent"
-  element={
-    <AppShell>
-      <AgentHomePage />
-    </AppShell>
-  }
-/>
-<Route
-  path="/agent/:leadId"
-  element={
-    <AppShell>
-      <AgentLeadPage />
-    </AppShell>
-  }
-/>
-        <Route
-          path="/"
-          element={
-            <AppShell>
-              <RoleRedirect />
-            </AppShell>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            <AppShell>
-              <AdminDashboard />
-            </AppShell>
-          }
-        />
-        <Route
-          path="/agent/:leadId"
-          element={
-            <AppShell>
-              <AgentLeadPage />
-            </AppShell>
-          }
-        />
-        <Route
-  path="/admin/lead/:leadId"
-  element={
-    <RequireAdmin>
-      <AppShell>
+        {/* Agreement gate: everything (except /lead-agreement) */}
+        <Route element={<RequireLeadAgreement />}>
+          {/* Root */}
+          <Route
+            path="/"
+            element={
+              <AppShell>
+                <RoleRedirect />
+              </AppShell>
+            }
+          />
 
-        <AdminLeadPage />
-      </AppShell>
-      
-    </RequireAdmin>
-  }
-/>
+          {/* ADMIN */}
+          <Route element={<RequireAdmin />}>
+            <Route
+              path="/admin"
+              element={
+                <AppShell>
+                  <AdminDashboard />
+                </AppShell>
+              }
+            />
+            <Route
+              path="/admin/lead/:leadId"
+              element={
+                <AppShell>
+                  <AdminLeadPage />
+                </AppShell>
+              }
+            />
+          </Route>
 
+          {/* AGENT */}
+          <Route element={<RequireAgent />}>
+            <Route
+              path="/agent"
+              element={
+                <AgentShell>
+                  <AgentHomePage />
+                </AgentShell>
+              }
+            />
+
+            {/* ✅ Restore this so clicking a lead works */}
+            <Route
+              path="/agent/:leadId"
+              element={
+                <AgentShell>
+                  <AgentLeadPage />
+                                </AgentShell>
+              }
+            />
+          </Route>
+        </Route>
+
+        {/* Agreement page is allowed while signed in */}
+        <Route path="/lead-agreement" element={<LeadAgreementPage />} />
+
+        {/* Catch-all */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
-
-      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

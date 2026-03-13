@@ -1,25 +1,30 @@
 import React from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, Outlet } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 
-export default function RequireAdmin({ children }) {
-  const { user, role, loading } = useAuth();
+export default function RequireAdmin() {
+  const { user, loading, role } = useAuth();
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[40vh] text-gray-600 text-sm">
-        Checking admin access...
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-sm text-gray-600">Loading...</div>
       </div>
     );
   }
 
-  if (!user) {
-    return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/login" replace />;
+
+  // if role is loaded separately, wait for it
+  if (!role) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <div className="text-sm text-gray-600">Loading role...</div>
+      </div>
+    );
   }
 
-  if (role !== "admin") {
-    return <Navigate to="/" replace />;
-  }
+  if (role !== "admin") return <Navigate to="/agent" replace />;
 
-  return children;
+  return <Outlet />;
 }

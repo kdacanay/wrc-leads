@@ -1,16 +1,41 @@
 // src/components/JournalTimeline.jsx
 import React, { useMemo, useState } from "react";
 
-function formatEntryDate(createdAt) {
-  if (!createdAt) return "";
-  if (createdAt.toDate) {
-    const d = createdAt.toDate();
-    return d.toLocaleString();
+function getEntryMillis(entry) {
+  if (!entry) return 0;
+
+  // ✅ Prefer normalized millis (what AdminLeadPage builds)
+  if (typeof entry.createdAtMillis === "number" && entry.createdAtMillis > 0) {
+    return entry.createdAtMillis;
   }
-  const d = new Date(createdAt);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString();
+
+  const v = entry.createdAt;
+
+  // Firestore Timestamp
+  if (v?.toMillis) return v.toMillis();
+  if (v?.seconds != null) return v.seconds * 1000;
+
+  // Number
+  if (typeof v === "number") return v;
+
+  // Date
+  if (v instanceof Date) return v.getTime();
+
+  // String
+  if (typeof v === "string") {
+    const t = new Date(v).getTime();
+    return Number.isNaN(t) ? 0 : t;
+  }
+
+  return 0;
 }
+
+function formatEntryDate(entry) {
+  const ms = getEntryMillis(entry);
+  if (!ms) return "";
+  return new Date(ms).toLocaleString();
+}
+
 
 export default function JournalTimeline({
   entries = [],
@@ -24,19 +49,8 @@ export default function JournalTimeline({
   const sortedEntries = useMemo(() => {
     const list = Array.isArray(entries) ? [...entries] : [];
     // newest first
-    return list.sort((a, b) => {
-      const aT = a?.createdAt?.toMillis
-        ? a.createdAt.toMillis()
-        : a?.createdAt
-        ? new Date(a.createdAt).getTime()
-        : 0;
-      const bT = b?.createdAt?.toMillis
-        ? b.createdAt.toMillis()
-        : b?.createdAt
-        ? new Date(b.createdAt).getTime()
-        : 0;
-      return bT - aT;
-    });
+return list.sort((a, b) => getEntryMillis(b) - getEntryMillis(a));
+
   }, [entries]);
 
   function startEdit(entry) {
@@ -82,11 +96,16 @@ export default function JournalTimeline({
             <div className="flex items-start justify-between gap-2">
               <div>
                 <div className="text-[11px] text-gray-500">
-                  {formatEntryDate(entry.createdAt)}
+                 {formatEntryDate(entry)}
+
                 </div>
                 {entry.createdByEmail && (
                   <div className="text-[11px] text-gray-500">
                     by {entry.createdByEmail}
+                    {entry._from === "array" && (
+  <div className="text-[10px] text-gray-400">(imported)</div>
+)}
+
                   </div>
                 )}
               </div>

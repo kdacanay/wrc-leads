@@ -2,6 +2,7 @@
 import React from "react";
 
 const DEFAULT_STYLES = {
+  
   default: "bg-gray-100 border-gray-300 text-gray-800",
 
   // status
@@ -10,7 +11,9 @@ const DEFAULT_STYLES = {
   short_term: "bg-yellow-100 border-yellow-300 text-yellow-800",
   long_term: "bg-emerald-100 border-emerald-300 text-emerald-800",
   do_not_call: "bg-red-100 border-red-300 text-red-800",
-
+  // ✅ converted / win state (WRC yellow + bold + extra border)
+ converted_listing_wrc:
+  "bg-[#fff200] border-black text-black font-extrabold border-2 shadow-sm",
   // relationship %
   "18": "bg-gray-100 border-gray-300 text-gray-800",
   "34": "bg-sky-100 border-sky-300 text-sky-800",
@@ -24,6 +27,8 @@ const DEFAULT_STYLES = {
   unsure: "bg-zinc-100 border-zinc-300 text-zinc-800",
   likely: "bg-orange-100 border-orange-300 text-orange-800",
   very_likely: "bg-red-100 border-red-300 text-red-800",
+
+bad_lead: "bg-red-100 border-red-300 text-red-800",
 };
 
 export default function LeadBadge({ value, label, styles = DEFAULT_STYLES }) {

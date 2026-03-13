@@ -228,3 +228,57 @@ exports.mergeUnregisteredLeadsOnCreate = authUser().onCreate(async (user) => {
 
   await batch.commit();
 });
+
+// functions/index.js
+// const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
+// const admin = require("firebase-admin");
+
+// admin.initializeApp();
+
+exports.notifyAdminOnLeadUpdate = onDocumentUpdated("leads/{leadId}", async (event) => {
+  const before = event.data?.before?.data();
+  const after = event.data?.after?.data();
+  const leadId = event.params.leadId;
+
+  if (!before || !after) return;
+
+  // Optional: ignore "no meaningful change" (prevents spam)
+  // If you want *literally every change*, remove this block.
+  const meaningful =
+    (after.latestActivityAt?.toMillis?.() || 0) !== (before.latestActivityAt?.toMillis?.() || 0) ||
+    (after.updatedAt?.toMillis?.() || 0) !== (before.updatedAt?.toMillis?.() || 0) ||
+    (after.latestActivityAdmin || "") !== (before.latestActivityAdmin || "") ||
+    (after.latestActivity || "") !== (before.latestActivity || "") ||
+    (after.journalLastEntry || "") !== (before.journalLastEntry || "");
+
+  if (!meaningful) return;
+
+  const leadName =
+    `${after.firstName || ""} ${after.lastName || ""}`.trim() || "(No name)";
+
+  const latest =
+    after.latestActivityAdmin ||
+    after.latestActivity ||
+    after.journalLastEntry ||
+    "Lead updated";
+
+  const updatedByName =
+    after.updatedByName ||
+    after.updatedByEmail ||
+    after.updatedBy ||
+    "Unknown";
+
+  const payload = {
+    leadId,
+    leadName,
+    latestActivity: latest,
+    updatedByName,
+    updatedBy: after.updatedBy || null,
+    isRead: false,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+
+  // Use event.id as doc id so retries don’t duplicate notifications
+  const notifId = event.id || `${leadId}_${Date.now()}`;
+  await admin.firestore().collection("adminNotifications").doc(notifId).set(payload);
+});

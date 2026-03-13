@@ -1,11 +1,15 @@
 // src/constants/leadOptions.js
 
 export const STATUS_OPTIONS = [
+  { value: "pending", label: "Pending" },
   { value: "engagement", label: "Engagement phase" },
   { value: "relationship", label: "Relationship phase" },
   { value: "short_term", label: "Short-term management" },
   { value: "long_term", label: "Long-term management" },
+   // ✅ NEW: terminal "win" state
+  { value: "converted_listing_wrc", label: "🏆 Converted – Listing With WRC" },
   { value: "do_not_call", label: "Do Not Call" },
+  { value: "bad_lead", label: "Bad Lead (Admin Only)" },
 ];
 
 export const LEAD_TYPE_OPTIONS = [
@@ -42,6 +46,7 @@ export const URGENCY_OPTIONS = [
 ];
 
 export const SOURCE_OPTIONS = [
+  { value: "vleads", label: "VLeads"},
   { value: "fsbo", label: "FSBO" },
   { value: "cold_call", label: "Cold calling" },
   { value: "referral_past_client", label: "Referral - past client" },

@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { collection, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
+import { normEmail, normName } from "../utils/normalize"; // adjust import path
 
 export default function useAssignableAgents() {
   const [agents, setAgents] = useState([]);
@@ -16,63 +17,81 @@ export default function useAssignableAgents() {
     let currentUnregistered = [];
     let derivedFromLeads = [];
 
+    // ---- deterministic key for placeholders ----
+    function placeholderKey({ email, name }) {
+      const e = normEmail(email || "");
+      if (e) return `unregEmail:${e}`;
+      const n = normName(String(name || "").replace(/\s*\*$/, ""));
+      if (n) return `unregName:${n}`;
+      return "";
+    }
+
+    function displayName(name) {
+      const clean = String(name || "").replace(/\s*\*$/, "").trim();
+      return clean ? `${clean} *` : "(Unnamed) *";
+    }
+
     const recompute = () => {
-      const merged = [];
+      // 1) Registered users always included (not placeholders)
+      const merged = currentUsers.map((u) => ({
+        id: u.id,
+        name: u.fullName || u.email || "Unnamed user",
+        email: u.email || "",
+        isPlaceholder: false,
+      }));
 
-      // 1) Registered users from "users"
-      currentUsers.forEach((u) => {
-        merged.push({
-          id: u.id,
-          name: u.fullName || u.email || "Unnamed user",
-          email: u.email || "",
-          isPlaceholder: false,
-        });
-      });
+      // 2) Build placeholder map (so we can merge unregisteredAgents + derivedFromLeads)
+      const ph = new Map(); // key -> row
 
-      // helper to add placeholders safely
-      const addPlaceholder = ({ id, name, email }) => {
-        const cleanName = (name || "").replace(/\s\*$/, "").trim();
-        const cleanEmail = (email || "").trim();
+      const upsertPlaceholder = ({ id, name, email }) => {
+        const key = placeholderKey({ email, name });
+        if (!key) return;
 
-        if (!cleanName && !cleanEmail) return;
+        const prev = ph.get(key);
+        if (!prev) {
+          ph.set(key, {
+            id, // keep a real-ish id if possible
+            name: displayName(name),
+            email: (email || "").trim(),
+            isPlaceholder: true,
+          });
+          return;
+        }
 
-        // avoid dupes by name or email
-        const already = merged.some((m) => {
-          const mName = (m.name || "").replace(/\s\*$/, "").trim().toLowerCase();
-          const mEmail = (m.email || "").trim().toLowerCase();
-          return (
-            (cleanName && mName === cleanName.toLowerCase()) ||
-            (cleanEmail && mEmail === cleanEmail.toLowerCase())
-          );
-        });
+        // merge: keep an id that points to real unregisteredAgents doc if we have it
+        if (String(prev.id || "").startsWith("lead-unreg:") && id && !String(id).startsWith("lead-unreg:")) {
+          prev.id = id;
+        }
 
-        if (already) return;
-
-        merged.push({
-          id,
-          name: cleanName ? `${cleanName} *` : "(Unnamed) *",
-          email: cleanEmail,
-          isPlaceholder: true,
-        });
+        // keep best email/name
+        if (!prev.email && email) prev.email = String(email).trim();
+        const prevNameClean = String(prev.name || "").replace(/\s*\*$/, "").trim();
+        const nextNameClean = String(name || "").replace(/\s*\*$/, "").trim();
+        if ((!prevNameClean || prevNameClean === "(Unnamed)") && nextNameClean) {
+          prev.name = displayName(nextNameClean);
+        }
       };
 
-      // 2) Placeholders from "unregisteredAgents" collection (if it exists)
+      // 2a) Placeholders from Firestore collection (authoritative)
       currentUnregistered.forEach((u) => {
-        addPlaceholder({
-          id: `unreg:${u.id}`,
+        upsertPlaceholder({
+          id: `unreg:${u.id}`, // stable reference to the doc
           name: u.name,
           email: u.email,
         });
       });
 
-      // 3) Placeholders derived from leads (works even if unregisteredAgents doesn't exist)
+      // 2b) Placeholders derived from leads (only fills gaps; can’t create dupes now)
       derivedFromLeads.forEach((u) => {
-        addPlaceholder({
-          id: `lead-unreg:${u.key}`, // stable-ish id
+        upsertPlaceholder({
+          id: `lead-unreg:${u.key}`,
           name: u.name,
           email: u.email,
         });
       });
+
+      // 3) Add placeholders to merged
+      merged.push(...Array.from(ph.values()));
 
       merged.sort((a, b) =>
         (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase())
@@ -93,25 +112,32 @@ export default function useAssignableAgents() {
     });
 
     const unsubLeads = onSnapshot(leadsRef, (snap) => {
-      const map = new Map();
+      const map = new Map(); // placeholderKey -> { key, name, email }
 
       snap.docs.forEach((d) => {
         const lead = d.data();
 
-        // only unregistered assignments
+        // We only derive "unregistered" placeholders from leads that do NOT have assignedAgentId
+        // (If you also want to derive secondary unregistered agents from assignedAgents, tell me and I’ll add it.)
         if (lead.assignedAgentId) return;
 
         const name = (lead.assignedAgentName || "").trim();
-        const email = (lead.assignedAgentEmail || "").trim();
-        if (!name && !email) return;
+        const email = (lead.assignedAgentEmailNorm || lead.assignedAgentEmail || "").trim();
 
-        const key = (name || email).toLowerCase();
+        const e = normEmail(email);
+        const n = normName(name);
+
+        // deterministic key (email first)
+        const key = e ? `unregEmail:${e}` : n ? `unregName:${n}` : "";
+        if (!key) return;
+
         if (!map.has(key)) {
           map.set(key, { key, name, email });
         } else {
-          // if we later find an email, keep it
+          // keep an email if we later discover it
           const existing = map.get(key);
           if (!existing.email && email) existing.email = email;
+          if (!existing.name && name) existing.name = name;
         }
       });
 
