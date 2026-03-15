@@ -1,15 +1,19 @@
 // src/constants/leadOptions.js
 
 export const STATUS_OPTIONS = [
-  { value: "pending", label: "Pending" },
-  { value: "engagement", label: "Engagement phase" },
-  { value: "relationship", label: "Relationship phase" },
-  { value: "short_term", label: "Short-term management" },
-  { value: "long_term", label: "Long-term management" },
-   // ✅ NEW: terminal "win" state
-  { value: "converted_listing_wrc", label: "🏆 Converted – Listing With WRC" },
-  { value: "do_not_call", label: "Do Not Call" },
-  { value: "bad_lead", label: "Bad Lead (Admin Only)" },
+  "Identified",
+  "Contacted",
+  "Connected",
+  "Meeting scheduled",
+  "Meeting held",
+  "Negotiating",
+  "Contract out",
+  "Recruited",
+  "Not qualified",
+  "Not interested",
+  "Interviewing",
+  "Short-term management",
+  "Long-term management",
 ];
 
 export const LEAD_TYPE_OPTIONS = [
@@ -19,17 +23,8 @@ export const LEAD_TYPE_OPTIONS = [
   { value: "renter", label: "Renter" },
 ];
 
-export const ENGAGEMENT_LEVEL_OPTIONS = [
-  { value: "identified",        label: "Identified" },
-  { value: "contacted",         label: "Contacted" },
-  { value: "meeting_scheduled", label: "Meeting scheduled" },
-  { value: "meeting_completed", label: "Meeting completed" },
-  { value: "in_pipeline",       label: "In pipeline" },
-];
-
-
 export const RELATIONSHIP_RANK_OPTIONS = [
-    {value: "0", label: "0% or new lead" },
+  { value: "0", label: "0% or new lead" },
   { value: "18", label: "18% likelihood" },
   { value: "34", label: "34% likelihood" },
   { value: "56", label: "56% likelihood" },
@@ -46,7 +41,7 @@ export const URGENCY_OPTIONS = [
 ];
 
 export const SOURCE_OPTIONS = [
-  { value: "vleads", label: "VLeads"},
+  { value: "vleads", label: "VLeads" },
   { value: "fsbo", label: "FSBO" },
   { value: "cold_call", label: "Cold calling" },
   { value: "referral_past_client", label: "Referral - past client" },
@@ -65,17 +60,21 @@ export const SOURCE_OPTIONS = [
 
 // label maps for quick lookup
 export const STATUS_LABELS = Object.fromEntries(
-  STATUS_OPTIONS.map((o) => [o.value, o.label])
+  STATUS_OPTIONS.map((s) => [s, s])
 );
+
 export const RELATIONSHIP_LABELS = Object.fromEntries(
   RELATIONSHIP_RANK_OPTIONS.map((o) => [o.value, o.label])
 );
+
 export const URGENCY_LABELS = Object.fromEntries(
   URGENCY_OPTIONS.map((o) => [o.value, o.label])
 );
+
 export const SOURCE_LABELS = Object.fromEntries(
   SOURCE_OPTIONS.map((o) => [o.value, o.label])
 );
+
 export const LEAD_TYPE_LABELS = Object.fromEntries(
   LEAD_TYPE_OPTIONS.map((o) => [o.value, o.label])
 );

@@ -34,7 +34,11 @@ import { Link, useNavigate } from "react-router-dom";
 // import { normName, normEmail } from "../utils/normalize";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { importVleadsXlsx } from "../utils/importVleadsXlsx";
-
+import {
+  calculateUrgencyLevelFromDueDate,
+  urgencyLevelPillLabel,
+  urgencyLevelDescription,
+} from "../utils/urgencyLevel";
 
 function normEmailLocal(v) {
   return String(v || "").trim().toLowerCase();
@@ -861,7 +865,7 @@ async function createAgentOnlyLink(lead) {
 // ---------- Main Admin Dashboard ----------
 
 export default function AdminDashboard() {
-  
+  const [showNewClosing, setShowNewClosing] = useState(false);
 
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
   const navigate = useNavigate();
@@ -932,7 +936,12 @@ const [agentLeadsTarget, setAgentLeadsTarget] = useState(null);
 
   const headerPad = dense ? "py-1" : "py-2";
   const cellPad = dense ? "py-1" : "py-2";
-
+const [snapshotModal, setSnapshotModal] = useState({
+  open: false,
+  title: "",
+  rows: [],
+});
+const [snapshotClosing, setSnapshotClosing] = useState(false);
 useEffect(() => {
   if (!user) return;
 
@@ -1233,9 +1242,92 @@ function openAgentLeads(agentRow) {
   setAgentLeadsOpen(true);
 }
 
+function openSnapshotModal(type) {
+  const rows = (leads || []).filter((l) => {
+    const level =
+      Number(l.schedulingPriorityLevel || l.levelOfUrgency) ||
+      calculateUrgencyLevelFromDueDate(l.nextEvaluationDate);
 
+    switch (type) {
+      case "total":
+        return true;
 
+      case "unassigned":
+        return !l.assignedAgentName && !l.assignedAgentId;
 
+      case "overdue": {
+        const ms = toMillis(l.nextEvaluationDate);
+        return ms && ms < Date.now();
+      }
+
+      case "dueNext7": {
+        const ms = toMillis(l.nextEvaluationDate);
+        if (!ms) return false;
+
+        const now = new Date();
+        const today = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate()
+        ).getTime();
+
+        const end = new Date(now);
+        end.setDate(end.getDate() + 7);
+        end.setHours(23, 59, 59, 999);
+
+        return ms >= today && ms <= end.getTime();
+      }
+
+      case "hot":
+        return l.relationshipRanking === "78" || l.relationshipRanking === "100";
+
+      case "priority4":
+        return level === 4;
+
+      case "priority3":
+        return level === 3;
+
+      case "priority2":
+        return level === 2;
+
+      case "priority1":
+        return level === 1;
+
+      default:
+        return false;
+    }
+  });
+
+  let title = "Lead Snapshot";
+  if (type === "total") title = "All Leads";
+  if (type === "unassigned") title = "Unassigned Leads";
+  if (type === "overdue") title = "Overdue Leads";
+  if (type === "dueNext7") title = "Leads Due in the Next 7 Days";
+  if (type === "hot") title = "Hot Leads";
+  if (type === "priority4") title = "Level 4 Leads";
+  if (type === "priority3") title = "Level 3 Leads";
+  if (type === "priority2") title = "Level 2 Leads";
+  if (type === "priority1") title = "Level 1 Leads";
+
+  setSnapshotModal({
+    open: true,
+    title,
+    rows: [...rows].sort((a, b) => {
+      const aName = `${a.firstName || ""} ${a.lastName || ""}`.trim();
+      const bName = `${b.firstName || ""} ${b.lastName || ""}`.trim();
+      return aName.localeCompare(bName);
+    }),
+  });
+}
+
+function closeSnapshotDrawer() {
+  setSnapshotClosing(true);
+
+  setTimeout(() => {
+    setSnapshotModal({ open: false, title: "", rows: [] });
+    setSnapshotClosing(false);
+  }, 250);
+}
 // function getLeadActivityMs(lead) {
 //   // 1) explicit activity timestamp
 //   const a = toMillis(lead.latestActivityAt);
@@ -1622,7 +1714,7 @@ async function createAdminNotificationFromLead(leadDoc) {
       const {
         firstAttemptDate,
         nextEvaluationDate,
-        journalLastEntry,
+        journalNote,
         ...rest
       } = formData;
 
@@ -1651,8 +1743,8 @@ async function createAdminNotificationFromLead(leadDoc) {
         firstAttemptDate: firstAttemptDate || null,
         nextEvaluationDate: nextEvaluationDate || null,
 
-        journalLastEntry: journalLastEntry || "",
-        journal: journalLastEntry
+        journalLastEntry: journalNote || "",
+        journal: journalNote
           ? [
               {
                 id: crypto.randomUUID(),
@@ -1669,9 +1761,11 @@ async function createAdminNotificationFromLead(leadDoc) {
         assignedAgentName,
         assignedAgentEmail,
 
-        status: rest.status || "engagement",
-        leadType: rest.leadType || "buyer",
-        source: rest.source || "import-csv",
+   status: rest.status || "Identified",
+leadType: rest.leadType || "buyer",
+source: rest.source || "other",
+level: rest.level || "1",
+schedulingPriorityLevel: Number(rest.schedulingPriorityLevel) || 1,
 
         createdAt: serverTimestamp(),
         createdBy: user.uid,
@@ -2040,9 +2134,48 @@ async function handleEmailAgent(lead) {
     });
   }, [filteredLeads, sortConfig]);
 
+function calculateUrgencyLevelFromDueDate(value) {
+  if (!value) return 1;
+
+  let dueMs = 0;
+
+  if (value?.toMillis) dueMs = value.toMillis();
+  else if (value instanceof Date) dueMs = value.getTime();
+  else {
+    const parsed = new Date(value).getTime();
+    dueMs = Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  if (!dueMs) return 1;
+
+  const now = new Date();
+  const todayStart = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate()
+  ).getTime();
+
+  const diffDays = Math.floor((dueMs - todayStart) / (1000 * 60 * 60 * 24));
+
+  if (diffDays <= 0) return 4;
+  if (diffDays <= 1) return 3;
+  if (diffDays <= 2) return 2;
+  return 1;
+}
+
+  
     const dashboardStats = React.useMemo(() => {
     const all = Array.isArray(leads) ? leads : [];
 
+    const priorityCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+
+for (const l of all) {
+  const level =
+    Number(l.schedulingPriorityLevel || l.levelOfUrgency) ||
+    calculateUrgencyLevelFromDueDate(l.nextEvaluationDate);
+
+  priorityCounts[level] = (priorityCounts[level] || 0) + 1;
+}
     const total = all.length;
     const unassigned = all.filter((l) => !l.assignedAgentName && !l.assignedAgentId).length;
 
@@ -2069,7 +2202,7 @@ async function handleEmailAgent(lead) {
       if (ms >= todayMs && ms <= end7Ms) dueNext7 += 1;
     }
 
-    return { total, unassigned, hot, overdue, dueNext7 };
+    return { total, unassigned, hot, overdue, dueNext7, priorityCounts };
   }, [leads]);
 
   // ---------- Agent stats ----------
@@ -2413,6 +2546,14 @@ if (isHot) unregisteredCounts[key].hot += 1;
     }
   }
 
+  function closeNewLeadPanel() {
+  setShowNewClosing(true);
+
+  setTimeout(() => {
+    setShowNew(false);
+    setShowNewClosing(false);
+  }, 250);
+}
   // ---------- Delete user (agent) ----------
 
 async function handleDeleteUser(agent) {
@@ -3289,251 +3430,314 @@ if (!leadId) {
   // ---------- Render ----------
 
 return (
-  <div className="min-h-screen bg-gray-50">
-    <div className="w-full px-4 sm:px-6 lg:px-10 py-6">
-      <div className="mx-auto w-full max-w-[1600px] space-y-6 text-sm">
-        {/* Header / toolbar */}
-        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h1 className="text-lg font-semibold text-gray-900">
-                Admin Lead Dashboard
-              </h1>
-              <p className="text-xs text-gray-600">
-                Signed in as <span className="font-medium">{user?.email}</span>
-              </p>
-            </div>
+  <div className="min-h-screen bg-[var(--color-wrcGray)] flex flex-col">
+<header className="bg-white border-b border-gray-200">
+  <div className="max-w-[1400px] mx-auto px-6 py-4 flex items-center justify-between">
+    <div className="flex items-center gap-3">
+      <div className="h-10 w-10 rounded-xl bg-[#fff200] border border-black/10" />
+      <div>
+        <div className="text-xs text-gray-500">Weichert Realtors Cornerstone</div>
+        <div className="text-lg font-extrabold text-[var(--color-wrcBlack)]">
+          WRC Leads — Admin
+        </div>
+      </div>
+    </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={importing}
-                onClick={() => fileInputRef.current?.click()}
-                className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-              >
-                {importing ? "Importing..." : "Import CSV"}
-              </button>
+    <div className="flex items-center gap-4">
+      <div className="text-right">
+        <div className="text-sm font-semibold text-[var(--color-wrcBlack)]">
+          {user?.displayName || "Admin"}
+        </div>
+        <div className="text-xs text-gray-500">{user?.email}</div>
+      </div>
 
- <VleadsImportButton actor={{ uid: user?.uid, email: user?.email }} />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setShowNew(true)}
+         className="px-4 py-2 rounded-md bg-black text-[#fff200] text-sm font-extrabold hover:opacity-90"
+        >
+          + Add Lead
+        </button>
 
+   <button
+  type="button"
+  onClick={() => navigate("/admin/agents")}
+  className="px-4 py-2 rounded-md border border-gray-300 bg-white text-sm font-semibold hover:bg-gray-50"
+>
+  Agent Summary
+</button>
 
-              <button
-                type="button"
-                onClick={handleExportCsv}
-                className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50"
-              >
-                Export CSV
-              </button>
+        <button
+          type="button"
+          onClick={() => {
+            window.location.href = "/login";
+          }}
+          className="px-4 py-2 rounded-md bg-black text-white font-semibold hover:opacity-90"
+        >
+          Logout
+        </button>
+      </div>
+    </div>
+  </div>
 
-              <button
-                type="button"
-                onClick={() => setFiltersOpen((v) => !v)}
-                className="border border-gray-300 text-xs px-3 py-2 rounded-full text-gray-700 hover:bg-gray-50"
-              >
-                Filters
-              </button>
+  <div className="h-2 bg-[#fff200]" />
+</header>
 
-              <button
-                type="button"
-                onClick={() => setShowNew(true)}
-                className="bg-wrcBlack text-wrcYellow text-xs font-semibold px-4 py-2 rounded-full hover:bg-black"
-              >
-                + New lead
-              </button>
-            </div>
-          </div>
+   <main className="w-full max-w-[1400px] mx-auto px-6 py-6 flex flex-col gap-6 flex-1 min-h-0 text-sm">
+    <section className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+  <div className="flex items-center justify-between gap-3">
+    <div>
+      <h3 className="text-lg font-bold text-[var(--color-wrcBlack)]">
+        Lead Snapshot
+      </h3>
+      <div className="text-sm text-gray-500">
+        Overview of current lead activity and pipeline.
+      </div>
+    </div>
+  </div>
 
-          {/* Search + density */}
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="w-full sm:max-w-md">
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search name, email, phone, status, source..."
-                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-xs bg-white"
-              />
-            </div>
+  <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+ <button
+  type="button"
+  onClick={() => openSnapshotModal("total")}
+  className="rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50"
+>
+  <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+    Total leads
+  </div>
+  <div className="mt-1 text-3xl font-extrabold text-[var(--color-wrcBlack)]">
+    {dashboardStats.total}
+  </div>
+</button>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setDense((d) => !d)}
-                className="text-[11px] px-3 py-2 border border-gray-300 rounded-xl text-gray-700 hover:bg-gray-50 bg-white"
-              >
-                Row density:{" "}
-                <span className="font-medium">
-                  {dense ? "Compact" : "Comfortable"}
-                </span>
-              </button>
-            </div>
-          </div>
+<button
+  type="button"
+  onClick={() => openSnapshotModal("unassigned")}
+  className="rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50"
+>
+  <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+    Unassigned
+  </div>
+  <div className="mt-1 text-3xl font-extrabold text-gray-700">
+    {dashboardStats.unassigned}
+  </div>
+</button>
 
-          {/* Filters panel */}
-          {filtersOpen && (
-            <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-3">
-              <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                <div className="flex items-center gap-1 mr-2">
-                  <button
-                    type="button"
-                    onClick={() => setDateQuickFilter("all")}
-                    className={cx(
-                      "px-3 py-1 rounded-full border text-[11px]",
-                      dateQuickFilter === "all"
-                        ? "bg-gray-900 text-white border-gray-900"
-                        : "border-gray-300 text-gray-700 hover:bg-white"
-                    )}
-                  >
-                    All
-                  </button>
+<button
+  type="button"
+  onClick={() => openSnapshotModal("overdue")}
+  className="rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50"
+>
+  <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+    Overdue
+  </div>
+  <div className="mt-1 text-3xl font-extrabold text-red-700">
+    {dashboardStats.overdue}
+  </div>
+</button>
 
-                  <button
-                    type="button"
-                    onClick={() => setDateQuickFilter("overdue")}
-                    className={cx(
-                      "px-3 py-1 rounded-full border text-[11px]",
-                      dateQuickFilter === "overdue"
-                        ? "bg-rose-600 text-white border-rose-600"
-                        : "border-gray-300 text-gray-700 hover:bg-white"
-                    )}
-                  >
-                    Overdue
-                  </button>
+<button
+  type="button"
+  onClick={() => openSnapshotModal("dueNext7")}
+  className="rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50"
+>
+  <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+    Due next 7 days
+  </div>
+  <div className="mt-1 text-3xl font-extrabold text-[var(--color-wrcBlack)]">
+    {dashboardStats.dueNext7}
+  </div>
+</button>
 
-                  <button
-                    type="button"
-                    onClick={() => setDateQuickFilter("thisWeek")}
-                    className={cx(
-                      "px-3 py-1 rounded-full border text-[11px]",
-                      dateQuickFilter === "thisWeek"
-                        ? "bg-amber-500 text-white border-amber-500"
-                        : "border-gray-300 text-gray-700 hover:bg-white"
-                    )}
-                  >
-                    Next 7 days
-                  </button>
-                </div>
+  <button
+  type="button"
+  onClick={() => openSnapshotModal("hot")}
+  className="rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50"
+>
+  <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+    Hot leads
+  </div>
+  <div className="mt-1 text-3xl font-extrabold text-[var(--color-wrcBlack)]">
+    {dashboardStats.hot}
+  </div>
+  <div className="mt-1 text-xs text-gray-500">
+    Relationship 78% or 100%
+  </div>
+</button>
+  </div>
 
-                <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
-                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-                >
-                  <option value="">All statuses</option>
-                  {Object.entries(STATUS_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+  <div className="mt-6">
+    <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+      Quick actions
+    </div>
 
-                <select
-                  value={sourceFilter}
-                  onChange={(e) => setSourceFilter(e.target.value)}
-                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-                >
-                  <option value="">All sources</option>
-                  {Object.entries(SOURCE_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+    <div className="mt-3 flex flex-wrap gap-2">
+      <button
+        type="button"
+        disabled={importing}
+        onClick={() => fileInputRef.current?.click()}
+        className="px-3 py-2 rounded-full border border-gray-200 bg-gray-50 text-sm font-semibold text-gray-800 hover:bg-gray-100"
+      >
+        {importing ? "Importing..." : "Import CSV"}
+      </button>
 
-                <select
-                  value={relationshipFilter}
-                  onChange={(e) => setRelationshipFilter(e.target.value)}
-                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-                >
-                  <option value="">All relationship ranks</option>
-                  {Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+      <div className="inline-block">
+        <VleadsImportButton actor={{ uid: user?.uid, email: user?.email }} />
+      </div>
 
-                <select
-                  value={urgencyFilter}
-                  onChange={(e) => setUrgencyFilter(e.target.value)}
-                  className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
-                >
-                  <option value="">All urgency levels</option>
-                  {Object.entries(URGENCY_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+      <button
+        type="button"
+        onClick={handleExportCsv}
+        className="px-3 py-2 rounded-full border border-gray-200 bg-gray-50 text-sm font-semibold text-gray-800 hover:bg-gray-100"
+      >
+        Export CSV
+      </button>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setStatusFilter("");
-                    setSourceFilter("");
-                    setRelationshipFilter("");
-                    setUrgencyFilter("");
-                    setDateQuickFilter("all");
-                    setSearch("");
-                  }}
-                  className="ml-auto px-3 py-2 rounded-xl border border-gray-300 text-[11px] text-gray-700 hover:bg-white"
-                >
-                  Clear all
-                </button>
-              </div>
+      <button
+        type="button"
+        onClick={() => setFiltersOpen((v) => !v)}
+        className="px-3 py-2 rounded-full border border-gray-200 bg-gray-50 text-sm font-semibold text-gray-800 hover:bg-gray-100"
+      >
+        {filtersOpen ? "Hide filters" : "Show filters"}
+      </button>
 
-              {/* Active chips */}
-              <div className="mt-3 flex flex-wrap gap-2">
-                {dateQuickFilter !== "all" && (
-                  <Chip onRemove={() => setDateQuickFilter("all")}>
-                    Due:{" "}
-                    {dateQuickFilter === "overdue" ? "Overdue" : "Next 7 days"}
-                  </Chip>
-                )}
-                {statusFilter && (
-                  <Chip onRemove={() => setStatusFilter("")}>
-                    Status: {STATUS_LABELS[statusFilter] || statusFilter}
-                  </Chip>
-                )}
-                {sourceFilter && (
-                  <Chip onRemove={() => setSourceFilter("")}>
-                    Source: {SOURCE_LABELS[sourceFilter] || sourceFilter}
-                  </Chip>
-                )}
-                {relationshipFilter && (
-                  <Chip onRemove={() => setRelationshipFilter("")}>
-                    Relationship:{" "}
-                    {RELATIONSHIP_LABELS[relationshipFilter] ||
-                      relationshipFilter}
-                  </Chip>
-                )}
-                {urgencyFilter && (
-                  <Chip onRemove={() => setUrgencyFilter("")}>
-                    Urgency: {URGENCY_LABELS[urgencyFilter] || urgencyFilter}
-                  </Chip>
-                )}
-                {search.trim() && (
-                  <Chip onRemove={() => setSearch("")}>
-                    Search: “{search.trim()}”
-                  </Chip>
-                )}
-              </div>
-            </div>
-          )}
+      <button
+        type="button"
+        onClick={() => setShowNew(true)}
+        className="px-3 py-2 rounded-full border border-gray-200 bg-gray-50 text-sm font-semibold text-gray-800 hover:bg-gray-100"
+      >
+        + New lead
+      </button>
+    </div>
+  </div>
+
+  {filtersOpen && (
+    <div className="mt-6">
+      <div className="text-xs font-bold tracking-wide text-gray-600 uppercase">
+        Filter breakdown
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+        <div className="flex items-center gap-1 mr-2">
+          <button
+            type="button"
+            onClick={() => setDateQuickFilter("all")}
+            className={cx(
+              "px-3 py-1 rounded-full border text-[11px]",
+              dateQuickFilter === "all"
+                ? "bg-gray-900 text-white border-gray-900"
+                : "border-gray-300 text-gray-700 hover:bg-white"
+            )}
+          >
+            All
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDateQuickFilter("overdue")}
+            className={cx(
+              "px-3 py-1 rounded-full border text-[11px]",
+              dateQuickFilter === "overdue"
+                ? "bg-rose-600 text-white border-rose-600"
+                : "border-gray-300 text-gray-700 hover:bg-white"
+            )}
+          >
+            Overdue
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setDateQuickFilter("thisWeek")}
+            className={cx(
+              "px-3 py-1 rounded-full border text-[11px]",
+              dateQuickFilter === "thisWeek"
+                ? "bg-amber-500 text-white border-amber-500"
+                : "border-gray-300 text-gray-700 hover:bg-white"
+            )}
+          >
+            Next 7 days
+          </button>
         </div>
 
-        {/* Stats row */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <StatCard label="Total leads" value={dashboardStats.total} />
-          <StatCard label="Unassigned" value={dashboardStats.unassigned} />
-          <StatCard label="Overdue" value={dashboardStats.overdue} />
-          <StatCard label="Due next 7 days" value={dashboardStats.dueNext7} />
-          <StatCard
-            label="Hot leads"
-            value={dashboardStats.hot}
-            sublabel="Relationship 78% or 100%"
-          />
-        </div>
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search name, email, phone, status, source..."
+          className="border border-gray-300 rounded-xl px-3 py-2 text-xs bg-white min-w-[260px]"
+        />
+
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+        >
+          <option value="">All statuses</option>
+          {Object.entries(STATUS_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={sourceFilter}
+          onChange={(e) => setSourceFilter(e.target.value)}
+          className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+        >
+          <option value="">All sources</option>
+          {Object.entries(SOURCE_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={relationshipFilter}
+          onChange={(e) => setRelationshipFilter(e.target.value)}
+          className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+        >
+          <option value="">All relationship ranks</option>
+          {Object.entries(RELATIONSHIP_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={urgencyFilter}
+          onChange={(e) => setUrgencyFilter(e.target.value)}
+          className="border border-gray-300 rounded-xl px-2 py-2 bg-white"
+        >
+          <option value="">All urgency levels</option>
+          {Object.entries(URGENCY_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+
+        <button
+          type="button"
+          onClick={() => {
+            setStatusFilter("");
+            setSourceFilter("");
+            setRelationshipFilter("");
+            setUrgencyFilter("");
+            setDateQuickFilter("all");
+            setSearch("");
+          }}
+          className="ml-auto px-3 py-2 rounded-xl border border-gray-300 text-[11px] text-gray-700 hover:bg-white"
+        >
+          Clear all
+        </button>
+      </div>
+    </div>
+  )}
+</section>
 
         {/* Hidden file input */}
         <input
@@ -3544,184 +3748,195 @@ return (
           onChange={handleCsvFileChange}
         />
 
-        {/* Notifications banner */}
-{/* Notifications banner */}
-{notifications.length > 0 && (
-  <div className="border border-amber-300 bg-amber-50 rounded-lg p-3 text-xs">
-<div className="flex items-center justify-between mb-1 gap-2">
-  <div className="font-semibold text-amber-900">
-    {notifications.length} lead{notifications.length > 1 ? "s" : ""} updated
-  </div>
+        {/* Import + Scheduling Priority Row */}
+        <div className="grid gap-6 lg:grid-cols-3">
+          <section className="lg:col-span-2 bg-white rounded-2xl shadow-lg p-6 border-t-4 border-[var(--color-wrcYellowUI)]">
+            <h3 className="text-lg font-bold text-[var(--color-wrcBlack)]">
+              Import Leads
+            </h3>
+            <p className="mt-1 text-sm text-gray-600">
+              Upload a CSV file or import VLeads to add or update lead records.
+            </p>
 
-  <div className="flex items-center gap-2">
-    <button
-      type="button"
-      onClick={() => setShowReadNotifs((v) => !v)}
-      className="text-[11px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100"
-    >
-      {showReadNotifs ? "Show unread only" : "Show read too"}
-    </button>
+            <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center">
+              <button
+                type="button"
+                disabled={importing}
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md cursor-pointer bg-[#fff200] text-[var(--color-wrcBlack)] font-extrabold border border-black/20 hover:brightness-95 w-full md:w-auto disabled:opacity-60"
+              >
+                📂 Choose CSV
+              </button>
 
-    <button
-      type="button"
-      onClick={handleMarkNotificationsRead}
-      className="text-[11px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100"
-    >
-      Mark all as read
-    </button>
-  </div>
-</div>
+              <div className="flex-1">
+                <div className="px-3 py-2 rounded-md border border-gray-200 bg-gray-50 text-sm text-gray-700 truncate">
+                  {importing ? "Import in progress..." : "Choose a CSV file to begin import"}
+                </div>
+              </div>
 
-
-    <div className="space-y-1 max-h-40 overflow-y-auto">
-      {visibleNotifications.map((n) => (
-        <div
-          key={n.id}
-          className={`flex items-start justify-between gap-2 border-b border-amber-100 pb-1 last:border-b-0 ${
-            n.isRead ? "opacity-60" : ""
-          }`}
-        >
-          <div>
-            <div className="font-medium text-amber-900">
-              {n.leadName}{" "}
-              <span className="text-[10px] text-amber-700">({n.leadId})</span>
+              <div className="w-full md:w-auto">
+                <VleadsImportButton actor={{ uid: user?.uid, email: user?.email }} />
+              </div>
             </div>
-          <div className="text-[11px] text-amber-900">
-  {n.latestActivity || "Lead updated"}
-</div>
-<div className="text-[10px] text-amber-700 mt-0.5">
-  {formatWhenFromNotif(n) ? `When: ${formatWhenFromNotif(n)}` : ""}
-</div>
-{n.eventAtMs ? (
-  <div className="text-[10px] text-amber-700">
-    When: {formatDT(n.eventAtMs)}
-  </div>
-) : null}
 
-            <div className="text-[10px] text-amber-700">
-              Updated by: {n.updatedByName}
+            <div className="mt-3 text-xs text-gray-500">
+              Supported imports include CSV lead files and VLeads Excel exports.
+            </div>
+          </section>
+<section className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+  <div>
+    <h3 className="text-lg font-bold text-[var(--color-wrcBlack)]">
+      Scheduling Priority Snapshot
+    </h3>
+    <p className="mt-1 text-sm text-gray-600">
+      Current lead counts by Scheduling Priority Level.
+    </p>
+  </div>
+
+  <div className="mt-4 space-y-3">
+    <button
+      type="button"
+      onClick={() => openSnapshotModal("priority4")}
+      className="w-full rounded-xl border border-red-200 bg-red-50 p-4 text-left hover:bg-red-100"
+    >
+      <div className="text-xs font-bold tracking-wide text-red-700 uppercase">
+        Level 4
+      </div>
+      <div className="mt-1 text-3xl font-extrabold text-red-700">
+        {dashboardStats.priorityCounts[4] || 0}
+      </div>
+      <div className="mt-1 text-xs text-red-700">
+        Must be contacted that day
+      </div>
+    </button>
+
+    <button
+      type="button"
+      onClick={() => openSnapshotModal("priority3")}
+      className="w-full rounded-xl border border-orange-200 bg-orange-50 p-4 text-left hover:bg-orange-100"
+    >
+      <div className="text-xs font-bold tracking-wide text-orange-700 uppercase">
+        Level 3
+      </div>
+      <div className="mt-1 text-3xl font-extrabold text-orange-700">
+        {dashboardStats.priorityCounts[3] || 0}
+      </div>
+      <div className="mt-1 text-xs text-orange-700">
+        Must be contacted from -1 day to +1 day
+      </div>
+    </button>
+
+    <button
+      type="button"
+      onClick={() => openSnapshotModal("priority2")}
+      className="w-full rounded-xl border border-blue-200 bg-blue-50 p-4 text-left hover:bg-blue-100"
+    >
+      <div className="text-xs font-bold tracking-wide text-blue-700 uppercase">
+        Level 2
+      </div>
+      <div className="mt-1 text-3xl font-extrabold text-blue-700">
+        {dashboardStats.priorityCounts[2] || 0}
+      </div>
+      <div className="mt-1 text-xs text-blue-700">
+        Must be contacted from -1 day to +2 days
+      </div>
+    </button>
+
+    <button
+      type="button"
+      onClick={() => openSnapshotModal("priority1")}
+      className="w-full rounded-xl border border-gray-200 bg-gray-50 p-4 text-left hover:bg-gray-100"
+    >
+      <div className="text-xs font-bold tracking-wide text-gray-700 uppercase">
+        Level 1
+      </div>
+      <div className="mt-1 text-3xl font-extrabold text-gray-700">
+        {dashboardStats.priorityCounts[1] || 0}
+      </div>
+      <div className="mt-1 text-xs text-gray-700">
+        Can be contacted from -1 day to +3 days
+      </div>
+    </button>
+  </div>
+</section>
+        </div>
+
+        {/* Notifications / Alerts */}
+        <section className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-bold text-[var(--color-wrcBlack)]">
+                Alerts
+              </h3>
+              <p className="text-sm text-gray-600">
+                Lead updates and recent activity requiring attention.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowReadNotifs((v) => !v)}
+                className="px-4 py-2 rounded-md border border-gray-300 bg-white text-sm font-semibold hover:bg-gray-50"
+              >
+                {showReadNotifs ? "Show unread only" : "Show read too"}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleMarkNotificationsRead}
+                className="px-4 py-2 rounded-md border border-gray-300 bg-white text-sm font-semibold hover:bg-gray-50"
+              >
+                Mark all read
+              </button>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => handleNotificationClick(n)}
-            className="text-[10px] px-2 py-1 rounded-full border border-amber-300 text-amber-900 hover:bg-amber-100 flex-shrink-0"
-          >
-            View lead
-          </button>
-        </div>
-      ))}
-    </div>
-  </div>
-)}
-
-{/* Agent summary */}
-{agentStats.length > 0 && (
-  <div className="border border-gray-200 rounded-lg bg-white p-3 text-xs">
-    {/* Header (does NOT scroll) */}
-    <div className="flex items-center justify-between mb-2">
-      <span className="font-semibold text-gray-700">Agent summary</span>
-      <span className="text-[11px] text-gray-500">Based on current leads</span>
-    </div>
-
-    {/* Scrollable content (does scroll) */}
-    <div className="max-h-[220px] overflow-y-auto overflow-x-auto pr-1">
-      <table className="min-w-full text-[11px]">
-        {/* Sticky table header (optional but nice) */}
-        <thead className="bg-gray-50 border-b border-gray-200 sticky top-0 z-10">
-          <tr className="uppercase tracking-wide text-gray-500">
-            <th className="px-2 py-1 text-left">Agent</th>
-            <th className="px-2 py-1 text-left">Email</th>
-            <th className="px-2 py-1 text-right">Total leads</th>
-            <th className="px-2 py-1 text-right">Hot leads</th>
-            <th className="px-2 py-1 text-right">Digest</th>
-            <th className="px-2 py-1 text-right">Delete</th>
-          </tr>
-        </thead>
-
-        <tbody>
-          {agentStats.map((a) => (
-            <tr key={a.id} className="border-b border-gray-100">
-              <td className="px-2 py-1">
-                <button
-                  type="button"
-                  onClick={() => openAgentLeads(a)}
-                  className="text-left text-blue-700 hover:underline"
-                  title="View all leads for this agent"
-                >
-                  <span className={a.isPlaceholder ? "italic" : ""}>
-                    {a.name}
-                  </span>
-                </button>
-
-                {a.isPlaceholder && (
-                  <span className="ml-1 text-[10px] text-gray-500">
-                    (unregistered)
-                  </span>
-                )}
-              </td>
-
-              <td className="px-2 py-1 text-blue-700">
-                {a.email || (
-                  <span className="text-gray-400">
-                    {a.isPlaceholder ? "No email on file" : "—"}
-                  </span>
-                )}
-              </td>
-
-              <td className="px-2 py-1 text-right">{a.total}</td>
-
-              <td className="px-2 py-1 text-right">
-                {a.hot > 0 ? (
-                  <span className="font-semibold text-amber-700">{a.hot}</span>
-                ) : (
-                  <span className="text-gray-400">0</span>
-                )}
-              </td>
-
-              <td className="px-2 py-1 text-right">
-                <button
-                  type="button"
-                  disabled={!a.email}
-                  onClick={() => handleEmailDigestForAgent(a)}
-                  className="px-2 py-1 border border-gray-300 rounded-full text-[10px] text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                  title={
-                    a.email
-                      ? "Email this agent a digest of recent lead updates"
-                      : "No email on file"
-                  }
-                >
-                  Email digest
-                </button>
-              </td>
-
-              <td className="px-2 py-1 text-right">
-                {a.isPlaceholder ? (
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteUnregisteredAgent(a)}
-                    className="px-2 py-1 border border-rose-300 text-rose-700 rounded-full text-[10px] hover:bg-rose-50"
+          <div className="mt-4">
+            <div className="max-h-[320px] overflow-y-auto pr-1 space-y-3">
+              {notifications.length === 0 ? (
+                <div className="text-sm text-gray-500">No alerts yet.</div>
+              ) : (
+                visibleNotifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`rounded-xl border p-3 transition ${
+                      n.isRead
+                        ? "border-gray-200 bg-white opacity-70"
+                        : "border-[var(--color-wrcYellowUI)] bg-white"
+                    }`}
                   >
-                    Delete unregistered
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteUser(a)}
-                    className="px-2 py-1 border border-red-300 text-red-700 rounded-full text-[10px] hover:bg-red-50"
-                  >
-                    Delete user
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  </div>
-)}
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-[var(--color-wrcBlack)]">
+                          <span className="font-extrabold">{n.leadName}</span>
+                          <span className="text-gray-500"> — </span>
+                          {n.latestActivity || "Lead updated"}
+                        </div>
+
+                        <div className="mt-1 text-xs text-gray-500">
+                          {n.updatedByName ? `${n.updatedByName} • ` : ""}
+                          {formatWhenFromNotif(n) || ""}
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleNotificationClick(n)}
+                        className="px-3 py-1 rounded-md border border-gray-300 bg-white text-xs font-bold hover:bg-gray-50"
+                      >
+                        View lead
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </section>
+
+
+
 
 
         {/* Leads list card */}
@@ -3813,70 +4028,49 @@ return (
           />
         </div>
 
-        {/* New Lead Modal */}
+        {/* New Lead Panel */}
         {showNew && (
-          <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-40">
-            <div className="bg-white rounded-xl shadow-xl border border-gray-200 max-w-2xl w-full mx-4 p-4 sm:p-6">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-900">New lead</h2>
+          <div className="fixed inset-0 z-50">
+            <div
+              className="absolute inset-0 bg-black/40"
+              onClick={closeNewLeadPanel}
+            />
+
+            <div
+              className={`absolute inset-y-0 right-0 w-full max-w-2xl bg-white shadow-2xl border-l border-gray-200 flex flex-col ${
+                showNewClosing
+                  ? "animate-[slideOutRight_.25s_ease-in]"
+                  : "animate-[slideInRight_.25s_ease-out]"
+              }`}
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+                <div>
+                  <h3 className="text-xl font-extrabold text-[var(--color-wrcBlack)]">
+                    Add Lead
+                  </h3>
+                  <p className="text-sm text-gray-500">
+                    Quick create a new lead
+                  </p>
+                </div>
+
                 <button
                   type="button"
-                  onClick={() => setShowNew(false)}
-                  className="text-xs text-gray-500 hover:text-gray-800"
+                  onClick={closeNewLeadPanel}
+                  className="px-4 py-2 rounded-md border border-gray-300 bg-white text-sm font-semibold hover:bg-gray-50"
                 >
-                  ✕ Close
+                  Close
                 </button>
               </div>
 
-              <div className="mb-4 border border-gray-200 rounded-lg p-3 bg-gray-50">
-                <h3 className="text-xs font-semibold text-gray-700 mb-2">
-                  Assign agent (optional)
-                </h3>
-
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                  <select
-                    value={newLeadAssignedAgentId}
-                    onChange={(e) =>
-                      setNewLeadAssignedAgentId(e.target.value)
-                    }
-                    className="w-full sm:w-1/2 border border-gray-300 rounded px-2 py-1.5 text-[11px]"
-                  >
-                    <option value="">-- Leave unassigned --</option>
-                    {Array.isArray(assignableAgents) &&
-                      assignableAgents.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {(a.fullName || a.email || "Unnamed user") +
-                            (a.email ? ` (${a.email})` : "")}
-                        </option>
-                      ))}
-                  </select>
-
-                  <div className="text-[11px] text-gray-600">
-                    {newLeadAssignedAgentId
-                      ? (() => {
-                          const a =
-                            Array.isArray(assignableAgents) &&
-                            assignableAgents.find(
-                              (ag) => ag.id === newLeadAssignedAgentId
-                            );
-                          if (!a) return null;
-                          return (
-                            <>
-                              <div className="font-medium">
-                                {a.fullName || a.email || "Unnamed user"}
-                              </div>
-                              {a.email && (
-                                <div className="text-blue-700">{a.email}</div>
-                              )}
-                            </>
-                          );
-                        })()
-                      : "No agent selected yet."}
-                  </div>
-                </div>
+              <div className="flex-1 overflow-y-auto p-6">
+                <LeadFormAdmin
+  onSave={handleCreateLead}
+  saving={saving}
+  assignableAgents={assignableAgents}
+  assignedAgentId={newLeadAssignedAgentId}
+  onAssignedAgentChange={setNewLeadAssignedAgentId}
+/>
               </div>
-
-              <LeadFormAdmin onSave={handleCreateLead} saving={saving} />
             </div>
           </div>
         )}
@@ -4195,11 +4389,100 @@ return (
               </div>
             );
           })()}
-      </div>
-    </div>
+                {snapshotModal.open && (
+        <div className="fixed inset-0 z-50">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={closeSnapshotDrawer}
+          />
+
+          <div
+            className={`absolute inset-y-0 right-0 w-full max-w-4xl bg-white shadow-2xl border-l border-gray-200 flex flex-col ${
+              snapshotClosing
+                ? "animate-[slideOutRight_.25s_ease-in]"
+                : "animate-[slideInRight_.25s_ease-out]"
+            }`}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-white shrink-0">
+              <div>
+                <h3 className="text-xl font-extrabold text-[var(--color-wrcBlack)]">
+                  {snapshotModal.title}
+                </h3>
+                <p className="text-sm text-gray-500">
+                  {snapshotModal.rows.length} lead{snapshotModal.rows.length === 1 ? "" : "s"}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeSnapshotDrawer}
+                className="px-4 py-2 rounded-md border border-gray-300 bg-white text-sm font-semibold hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-auto">
+              {snapshotModal.rows.length === 0 ? (
+                <div className="p-6 text-sm text-gray-500">No leads found.</div>
+              ) : (
+                <table className="w-full border-collapse">
+                  <thead className="sticky top-0 bg-gray-100 z-10">
+                    <tr className="border-b border-gray-200">
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase">Lead</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase">Relationship</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase">Urgency</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase">Assigned Agent</th>
+                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-600 uppercase">Due Date</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {snapshotModal.rows.map((l) => (
+                      <tr
+                        key={l.id}
+                        className="border-b border-gray-100 hover:bg-yellow-50 cursor-pointer"
+                        onClick={() => navigate(`/admin/lead/${encodeURIComponent(l.id)}`)}
+                      >
+                        <td className="px-4 py-3 align-top">
+                          <div className="text-sm font-semibold text-gray-900">
+                            {`${l.firstName || ""} ${l.lastName || ""}`.trim() || l.email || l.id}
+                          </div>
+                          <div className="text-xs text-gray-500">{l.email || "—"}</div>
+                        </td>
+
+                        <td className="px-4 py-3 align-top text-sm text-gray-800">
+                          {STATUS_LABELS[l.status] || l.status || "—"}
+                        </td>
+
+                        <td className="px-4 py-3 align-top text-sm text-gray-800">
+                          {RELATIONSHIP_LABELS[l.relationshipRanking] || l.relationshipRanking || "—"}
+                        </td>
+
+                        <td className="px-4 py-3 align-top text-sm text-gray-800">
+                          {URGENCY_LABELS[l.urgencyRanking] || l.urgencyRanking || "—"}
+                        </td>
+
+                        <td className="px-4 py-3 align-top text-sm text-gray-800">
+                          {l.assignedAgentName || l.assignedAgentEmail || "—"}
+                        </td>
+
+                        <td className="px-4 py-3 align-top text-sm text-gray-800">
+                          {formatDate(l.nextEvaluationDate) || "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </main>
   </div>
 );
-
 }
 function VirtualAdminLeadGrid({
   leads,
@@ -4810,7 +5093,6 @@ const agentLeads = React.useMemo(() => {
             </tbody>
           </table>
         </div>
-
         <div className="mt-3 text-[11px] text-gray-500">
           Tip: This is filtering by {target.isPlaceholder ? "assignedAgentName" : "assignedAgentId"}.
         </div>

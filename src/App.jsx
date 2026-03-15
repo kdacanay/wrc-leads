@@ -14,6 +14,7 @@ import AgentLeadPage from "./pages/AgentLeadPage";
 import { useAuth } from "./contexts/AuthContext";
 import RequireAdmin from "./components/RequireAdmin";
 import RequireLeadAgreement from "./components/RequireLeadAgreement";
+import AdminAgentSummary from "./pages/AdminAgentSummary";
 
 function LoadingScreen({ text = "Loading..." }) {
   return (
@@ -85,6 +86,14 @@ export default function App() {
                 </AppShell>
               }
             />
+            <Route
+  path="/admin/agents"
+  element={
+    <AppShell>
+      <AdminAgentSummary />
+    </AppShell>
+  }
+/>
             <Route
               path="/admin/lead/:leadId"
               element={

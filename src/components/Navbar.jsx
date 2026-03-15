@@ -6,9 +6,11 @@ export default function Navbar() {
   const { user, role, logout } = useAuth();
   const location = useLocation();
 
-  const isLogin = location.pathname === "/login";
+const hideNavbar =
+  location.pathname === "/login" ||
+  location.pathname.startsWith("/admin");
 
-  if (isLogin) return null; // no navbar on login
+if (hideNavbar) return null;
 
   return (
     <header className="bg-wrcYellow border-b border-gray-300">

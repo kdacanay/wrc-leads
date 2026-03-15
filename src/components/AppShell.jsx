@@ -5,7 +5,6 @@ import Navbar from "./Navbar";
 export default function AppShell({ children }) {
   const location = useLocation();
 
-  // Treat admin routes as full-width dashboards
   const isAdmin = location.pathname.startsWith("/admin");
 
   return (
@@ -15,7 +14,7 @@ export default function AppShell({ children }) {
       <main className="flex-1">
         {isAdmin ? (
           /* ===== FULL-WIDTH ADMIN LAYOUT ===== */
-          <div className="w-full px-4 sm:px-6 lg:px-10 py-6">
+          <div className="w-full">
             {children}
           </div>
         ) : (

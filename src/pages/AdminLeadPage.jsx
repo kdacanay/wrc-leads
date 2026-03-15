@@ -26,6 +26,8 @@ import {
   URGENCY_LABELS,
 } from "../constants/leadOptions";
 import useAssignableAgents from "../hooks/useAssignableAgents";
+import LeadDetailView from "../components/LeadDetailView";
+
 
 function safeId() {
   return `unreg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1000,383 +1002,295 @@ const bodyLines = [
   if (loading) return <div className="text-sm text-gray-600">Loading lead...</div>;
   if (!lead) return <div className="text-sm text-red-600">Lead not found.</div>;
 
-  return (
-    <div className="text-sm">
-      {/* Sticky page header */}
-      <div className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-gray-200">
-        <div className="max-w-[1600px] mx-auto px-4 lg:px-6 py-3 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h1 className="text-base sm:text-lg font-semibold text-gray-900 truncate">
-                {lead.firstName} {lead.lastName}
-              </h1>
-              <span className="hidden sm:inline text-xs text-gray-500">•</span>
-              <span className="hidden sm:inline text-xs text-gray-500 truncate">
-                Lead details
-              </span>
+    const adminBadges = [
+    { value: lead.status, label: STATUS_LABELS[lead.status] || lead.status },
+    {
+      value: lead.relationshipRanking,
+      label: RELATIONSHIP_LABELS[lead.relationshipRanking] || lead.relationshipRanking,
+    },
+    {
+      value: lead.urgencyRanking,
+      label: URGENCY_LABELS[lead.urgencyRanking] || lead.urgencyRanking,
+    },
+  ];
+
+  const adminSidebar = (
+    <div className="lg:sticky lg:top-[88px] space-y-6">
+      <div className="border border-gray-200 rounded-xl bg-white p-4">
+        <h3 className="text-sm font-semibold text-gray-900 mb-3">Agent & notifications</h3>
+
+        <div className="text-xs text-gray-700">
+          <div className="text-[11px] text-gray-500 mb-1">Current assignment</div>
+
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            {lead.assignedAgentName ? (
+              <>
+                <div className="font-medium">{lead.assignedAgentName}</div>
+                {lead.assignedAgentEmail ? (
+                  <div className="text-blue-700 text-[11px] mt-0.5">{lead.assignedAgentEmail}</div>
+                ) : (
+                  <div className="text-[11px] text-gray-400 mt-0.5">No email on file</div>
+                )}
+              </>
+            ) : (
+              <div className="italic text-gray-400">Unassigned</div>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <div className="text-[11px] font-semibold text-gray-700 mb-1">Assign / change agent</div>
+
+          <select
+            value={selectedAgentId}
+            onChange={(e) => setSelectedAgentId(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+          >
+            <option value="">— Unassigned —</option>
+            {allAssignableAgents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {(a.name || a.email || "Unnamed user") + (a.email ? ` (${a.email})` : "")}
+              </option>
+            ))}
+          </select>
+
+          <div className="mt-4 border-t pt-4">
+            <div className="text-[11px] font-semibold text-gray-700 mb-2">
+              Also assigned agents
             </div>
 
-            <div className="mt-0.5 text-xs text-gray-500 flex items-center gap-2">
-              <span className="font-mono bg-gray-100 px-1.5 py-0.5 rounded">{lead.id}</span>
-              {saving ? (
-                <span className="text-gray-600">Saving…</span>
-              ) : (
-                <span className="text-gray-400">Saved when you click “Save lead”</span>
-              )}
+            <div className="flex gap-2">
+              <select
+                value={secondaryAgentId}
+                onChange={(e) => setSecondaryAgentId(e.target.value)}
+                className="flex-1 border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+              >
+                <option value="">— Add additional agent —</option>
+                {allAssignableAgents
+                  .filter((a) => !a.isPlaceholder)
+                  .filter((a) => a.id !== (lead.assignedAgentId || ""))
+                  .map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {(a.name || a.email || "Unnamed user") + (a.email ? ` (${a.email})` : "")}
+                    </option>
+                  ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={handleAddSecondaryAgent}
+                disabled={!secondaryAgentId || updatingAssignments}
+                className="px-3 py-2 rounded-lg bg-black text-white text-[12px] disabled:opacity-60"
+              >
+                {updatingAssignments ? "..." : "Add"}
+              </button>
             </div>
+
+            {secondaryAssignedAgents.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {secondaryAssignedAgents.map((a) => (
+                  <div
+                    key={a.id}
+                    className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[12px] font-medium text-gray-800 truncate">
+                        {a.name || a.email}
+                      </div>
+                      {a.email ? (
+                        <div className="text-[11px] text-gray-500 truncate">{a.email}</div>
+                      ) : null}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveSecondaryAgent(a)}
+                      disabled={updatingAssignments}
+                      className="text-[11px] px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-2 text-[11px] text-gray-500">No additional agents assigned.</div>
+            )}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <p className="mt-2 text-[10px] text-gray-500">
+            Assignment changes save when you click <span className="font-semibold">“Save lead”</span>.
+          </p>
+        </div>
+
+        <div className="mt-4 border-t pt-4">
+          <div className="text-[11px] font-semibold text-gray-700 mb-2">Assign unregistered agent</div>
+
+          <div className="space-y-2">
+            <input
+              type="text"
+              placeholder="Agent full name"
+              value={newAgentName}
+              onChange={(e) => setNewAgentName(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+            />
+            <input
+              type="email"
+              placeholder="Email (optional)"
+              value={newAgentEmail}
+              onChange={(e) => setNewAgentEmail(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+            />
             <button
               type="button"
-              onClick={() => navigate("/admin")}
-              className="text-xs px-3 py-1.5 rounded-full border border-gray-300 text-gray-700 hover:bg-gray-50"
+              onClick={handleCreateAndAssignAgent}
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] hover:bg-gray-50"
             >
-              ← Back
+              Create & assign
             </button>
           </div>
         </div>
+
+        {canEmailAgent && (
+          <div className="mt-4 border-t pt-4 space-y-2">
+            <button
+              type="button"
+              onClick={handleEmailAgentAboutLatest}
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50"
+            >
+              Email agent about latest update
+            </button>
+            <button
+              type="button"
+              onClick={handleEmailAgentInvite}
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50"
+            >
+              Email invite to register
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Page container */}
-      <div className="max-w-[1600px] mx-auto px-4 lg:px-6 py-6">
-        {/* Badges row */}
-        <div className="flex flex-wrap gap-2 mb-5">
-          <LeadBadge value={lead.status} label={STATUS_LABELS[lead.status] || lead.status} />
-          <LeadBadge
-            value={lead.relationshipRanking}
-            label={RELATIONSHIP_LABELS[lead.relationshipRanking] || lead.relationshipRanking}
-          />
-          <LeadBadge
-            value={lead.urgencyRanking}
-            label={URGENCY_LABELS[lead.urgencyRanking] || lead.urgencyRanking}
-          />
-        </div>
-{/* Rejection request banner */}
-{lead?.rejectionRequested ? (
-  <div className="border border-red-200 bg-red-50 rounded-xl p-3">
-    <div className="text-sm font-semibold text-red-900">
-      🚫 Rejection Requested (Pending Review)
-    </div>
-    <div className="mt-1 text-xs text-red-900/80 whitespace-pre-wrap">
-      {lead.rejectionReason?.trim() ? lead.rejectionReason : "No reason provided."}
-    </div>
-    <div className="mt-2 text-[11px] text-red-800/70">
-      Requested by: {lead.rejectionRequestedByEmail || lead.rejectionRequestedBy || "Unknown"}{" "}
-      {lead.rejectionRequestedAt?.toDate ? `• ${lead.rejectionRequestedAt.toDate().toLocaleString()}` : ""}
-    </div>
-  </div>
-) : null}
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* MAIN */}
-          <div className="lg:col-span-8 space-y-6">
-            <div className="border border-gray-200 rounded-xl bg-white p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-900">Lead details</h2>
-                <span className="text-[11px] text-gray-500">Use “Save lead” to store updates</span>
-              </div>
-
-              <LeadFormAdmin initialData={lead} onSave={handleAdminSave} saving={saving} />
-            </div>
-
-            {/* Journal */}
-            <div className="border border-gray-200 rounded-xl bg-white p-4">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-sm font-semibold text-gray-900">Journal</h2>
-                <span className="text-[11px] text-gray-500">Most recent entries appear first</span>
-              </div>
-<JournalTimeline
-  entries={sharedJournal}
-  canEdit
-  onDeleteEntry={handleDeleteJournalEntry}
-  onEditEntry={handleEditJournalEntry}
-/>
-
-
-              {(importedJournal?.length || 0) > 0 && (
-                <div className="mt-3 text-[11px] text-gray-500">
-                  Note: Some entries are <span className="font-semibold">imported</span> and stored on the lead document.
-                  Edit/delete is disabled for imported notes.
-                </div>
-              )}
+      <div className="border border-red-200 bg-red-50 rounded-xl p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold text-red-900">Bad Lead (Admin Only)</div>
+            <div className="text-[11px] text-red-900/80 mt-1">
+              Use this only after reviewing the rejection request.
             </div>
           </div>
 
-          {/* SIDEBAR */}
-          <div className="lg:col-span-4 space-y-6">
-            <div className="lg:sticky lg:top-[88px] space-y-6">
-              {/* Agent & notifications */}
-              <div className="border border-gray-200 rounded-xl bg-white p-4">
-                <h3 className="text-sm font-semibold text-gray-900 mb-3">Agent & notifications</h3>
+          <button
+            type="button"
+            onClick={async () => {
+              const ok = window.confirm("Mark this lead as BAD LEAD? This is admin-only.");
+              if (!ok) return;
 
-                <div className="text-xs text-gray-700">
-                  <div className="text-[11px] text-gray-500 mb-1">Current assignment</div>
+              const msg = "🚫 Admin marked this lead as BAD LEAD.";
 
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                    {lead.assignedAgentName ? (
-                      <>
-                        <div className="font-medium">{lead.assignedAgentName}</div>
-                        {lead.assignedAgentEmail ? (
-                          <div className="text-blue-700 text-[11px] mt-0.5">{lead.assignedAgentEmail}</div>
-                        ) : (
-                          <div className="text-[11px] text-gray-400 mt-0.5">No email on file</div>
-                        )}
-                      </>
-                    ) : (
-                      <div className="italic text-gray-400">Unassigned</div>
-                    )}
-                  </div>
-                </div>
+              await updateDoc(doc(db, "leads", leadId), {
+                status: "bad_lead",
+                rejectionStatus: "approved",
+                updatedAt: serverTimestamp(),
+                updatedBy: user?.uid || "",
+                latestActivity: msg,
+                latestActivityAt: serverTimestamp(),
+                journalLastEntry: msg,
+              });
 
-                <div className="mt-4">
-                  <div className="text-[11px] font-semibold text-gray-700 mb-1">Assign / change agent</div>
+              await addJournalEntry(msg, "admin-update", "shared");
+              await addAdminNotification(msg);
+            }}
+            className="px-3 py-2 rounded-lg bg-red-600 text-white text-[12px] hover:bg-red-700"
+          >
+            Mark Bad Lead
+          </button>
+        </div>
 
-                  <select
-                    value={selectedAgentId}
-                    onChange={(e) => setSelectedAgentId(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-                  >
-                    <option value="">— Unassigned —</option>
-                    {allAssignableAgents.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {(a.name || a.email || "Unnamed user") + (a.email ? ` (${a.email})` : "")}
-                      </option>
-                    ))}
-                  </select>
-
-                  {/* Secondary agents */}
-                  <div className="mt-4 border-t pt-4">
-                    <div className="text-[11px] font-semibold text-gray-700 mb-2">
-                      Also assigned agents
-                    </div>
-
-                    <div className="flex gap-2">
-                      <select
-                        value={secondaryAgentId}
-                        onChange={(e) => setSecondaryAgentId(e.target.value)}
-                        className="flex-1 border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-                      >
-                        <option value="">— Add additional agent —</option>
-                        {allAssignableAgents
-                          .filter((a) => !a.isPlaceholder)
-                          .filter((a) => a.id !== (lead.assignedAgentId || ""))
-                          .map((a) => (
-                            <option key={a.id} value={a.id}>
-                              {(a.name || a.email || "Unnamed user") + (a.email ? ` (${a.email})` : "")}
-                            </option>
-                          ))}
-                      </select>
-
-                      <button
-                        type="button"
-                        onClick={handleAddSecondaryAgent}
-                        disabled={!secondaryAgentId || updatingAssignments}
-                        className="px-3 py-2 rounded-lg bg-black text-white text-[12px] disabled:opacity-60"
-                      >
-                        {updatingAssignments ? "..." : "Add"}
-                      </button>
-                    </div>
-
-                    {secondaryAssignedAgents.length > 0 ? (
-                      <div className="mt-3 space-y-2">
-                        {secondaryAssignedAgents.map((a) => (
-                          <div
-                            key={a.id}
-                            className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2"
-                          >
-                            <div className="min-w-0">
-                              <div className="text-[12px] font-medium text-gray-800 truncate">
-                                {a.name || a.email}
-                              </div>
-                              {a.email ? (
-                                <div className="text-[11px] text-gray-500 truncate">{a.email}</div>
-                              ) : null}
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveSecondaryAgent(a)}
-                              disabled={updatingAssignments}
-                              className="text-[11px] px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="mt-2 text-[11px] text-gray-500">No additional agents assigned.</div>
-                    )}
-                  </div>
-
-                  <p className="mt-2 text-[10px] text-gray-500">
-                    Assignment changes save when you click <span className="font-semibold">“Save lead”</span>.
-                  </p>
-                </div>
-
-                {/* Assign unregistered */}
-                <div className="mt-4 border-t pt-4">
-                  <div className="text-[11px] font-semibold text-gray-700 mb-2">Assign unregistered agent</div>
-
-                  <div className="space-y-2">
-                    <input
-                      type="text"
-                      placeholder="Agent full name"
-                      value={newAgentName}
-                      onChange={(e) => setNewAgentName(e.target.value)}
-                      className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-                    />
-                    <input
-                      type="email"
-                      placeholder="Email (optional)"
-                      value={newAgentEmail}
-                      onChange={(e) => setNewAgentEmail(e.target.value)}
-                      className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleCreateAndAssignAgent}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] hover:bg-gray-50"
-                    >
-                      Create & assign
-                    </button>
-                  </div>
-                </div>
-
-                {canEmailAgent && (
-                  <div className="mt-4 border-t pt-4 space-y-2">
-                    <button
-                      type="button"
-                      onClick={handleEmailAgentAboutLatest}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50"
-                    >
-                      Email agent about latest update
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleEmailAgentInvite}
-                      className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50"
-                    >
-                      Email invite to register
-                    </button>
-                  </div>
-                )}
-              </div>
-{/* Admin-only: finalize rejection */}
-<div className="mt-4 border border-red-200 bg-red-50 rounded-xl p-3">
-  <div className="flex items-start justify-between gap-3">
-    <div>
-      <div className="text-xs font-semibold text-red-900">
-        Bad Lead (Admin Only)
-      </div>
-      <div className="text-[11px] text-red-900/80 mt-1">
-        Use this only after reviewing the rejection request.
-      </div>
-    </div>
-
-    <button
-      type="button"
-      onClick={async () => {
-        const ok = window.confirm("Mark this lead as BAD LEAD? This is admin-only.");
-        if (!ok) return;
-
-        const msg = "🚫 Admin marked this lead as BAD LEAD.";
-
-        await updateDoc(doc(db, "leads", leadId), {
-          status: "bad_lead",
-          rejectionStatus: "approved",
-          updatedAt: serverTimestamp(),
-          updatedBy: user?.uid || "",
-          latestActivity: msg,
-          latestActivityAt: serverTimestamp(),
-          journalLastEntry: msg,
-        });
-
-        await addJournalEntry(msg, "admin-update", "shared");
-        await addAdminNotification(msg);
-      }}
-      className="px-3 py-2 rounded-lg bg-red-600 text-white text-[12px] hover:bg-red-700"
-    >
-      Mark Bad Lead
-    </button>
-  </div>
-
-  {lead?.rejectionRequested ? (
-    <div className="mt-3 text-[11px] text-red-900/90 whitespace-pre-wrap">
-      <span className="font-semibold">Agent reason:</span>{" "}
-      {lead.rejectionReason || "—"}
-    </div>
-  ) : null}
-</div>
-
-              {/* Assigned agent email */}
-              <div className="border border-gray-200 rounded-xl bg-white p-4">
-                <h3 className="text-sm font-semibold text-gray-900 mb-2">Assigned agent email</h3>
-                <p className="text-[11px] text-gray-500 mb-3">
-                  Use this when a lead was imported with an agent name but no email.
-                </p>
-
-                <div className="space-y-2">
-                  <input
-                    type="email"
-                    value={manualAgentEmail}
-                    onChange={(e) => setManualAgentEmail(e.target.value)}
-                    placeholder="agent@example.com"
-                    className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSaveAgentEmail}
-                    disabled={savingAgentEmail}
-                    className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-                  >
-                    {savingAgentEmail ? "Saving..." : "Save agent email"}
-                  </button>
-                </div>
-              </div>
-
-              {/* Action item */}
-              <div className="border border-amber-200 rounded-xl bg-amber-50 p-4">
-                <h3 className="text-sm font-semibold text-amber-900 mb-1">Action item (agent-visible)</h3>
-                <p className="text-[11px] text-amber-900/80 mb-3">
-                  This shows on the agent dashboard under “Next Action Item.”
-                </p>
-
-                <textarea
-                  rows={4}
-                  className="w-full border border-amber-300 rounded-lg px-2 py-2 text-[12px] bg-white"
-                  placeholder="Example: Call by Friday to schedule a buyer consult…"
-                  value={actionItemDraft}
-                  onChange={(e) => setActionItemDraft(e.target.value)}
-                />
-
-                <p className="mt-2 text-[10px] text-amber-900/70">
-                  Saves when you click <span className="font-semibold">“Save lead”</span>.
-                </p>
-              </div>
-
-              {/* Property address */}
-              <div className="border border-gray-200 rounded-xl bg-white p-4">
-                <h3 className="text-sm font-semibold text-gray-900 mb-1">Property address (agent-visible)</h3>
-                <p className="text-[11px] text-gray-500 mb-3">This is the address the lead is asking about.</p>
-
-                <input
-                  type="text"
-                  value={propertyAddressDraft}
-                  onChange={(e) => setPropertyAddressDraft(e.target.value)}
-                  placeholder='e.g., "123 Main St, West Chester, PA 19382"'
-                  className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-                />
-
-                <p className="mt-2 text-[10px] text-gray-500">
-                  Saves when you click <span className="font-semibold">“Save lead”</span>.
-                </p>
-              </div>
-            </div>
+        {lead?.rejectionRequested ? (
+          <div className="mt-3 text-[11px] text-red-900/90 whitespace-pre-wrap">
+            <span className="font-semibold">Agent reason:</span>{" "}
+            {lead.rejectionReason || "—"}
           </div>
+        ) : null}
+      </div>
+
+      <div className="border border-gray-200 rounded-xl bg-white p-4">
+        <h3 className="text-sm font-semibold text-gray-900 mb-2">Assigned agent email</h3>
+        <p className="text-[11px] text-gray-500 mb-3">
+          Use this when a lead was imported with an agent name but no email.
+        </p>
+
+        <div className="space-y-2">
+          <input
+            type="email"
+            value={manualAgentEmail}
+            onChange={(e) => setManualAgentEmail(e.target.value)}
+            placeholder="agent@example.com"
+            className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+          />
+          <button
+            type="button"
+            onClick={handleSaveAgentEmail}
+            disabled={savingAgentEmail}
+            className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            {savingAgentEmail ? "Saving..." : "Save agent email"}
+          </button>
         </div>
       </div>
+
+      <div className="border border-amber-200 rounded-xl bg-amber-50 p-4">
+        <h3 className="text-sm font-semibold text-amber-900 mb-1">Action item (agent-visible)</h3>
+        <p className="text-[11px] text-amber-900/80 mb-3">
+          This shows on the agent dashboard under “Next Action Item.”
+        </p>
+
+        <textarea
+          rows={4}
+          className="w-full border border-amber-300 rounded-lg px-2 py-2 text-[12px] bg-white"
+          placeholder="Example: Call by Friday to schedule a buyer consult…"
+          value={actionItemDraft}
+          onChange={(e) => setActionItemDraft(e.target.value)}
+        />
+
+        <p className="mt-2 text-[10px] text-amber-900/70">
+          Saves when you click <span className="font-semibold">“Save lead”</span>.
+        </p>
+      </div>
+
+      <div className="border border-gray-200 rounded-xl bg-white p-4">
+        <h3 className="text-sm font-semibold text-gray-900 mb-1">Property address (agent-visible)</h3>
+        <p className="text-[11px] text-gray-500 mb-3">This is the address the lead is asking about.</p>
+
+        <input
+          type="text"
+          value={propertyAddressDraft}
+          onChange={(e) => setPropertyAddressDraft(e.target.value)}
+          placeholder='e.g., "123 Main St, West Chester, PA 19382"'
+          className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+        />
+
+        <p className="mt-2 text-[10px] text-gray-500">
+          Saves when you click <span className="font-semibold">“Save lead”</span>.
+        </p>
+      </div>
     </div>
+  );
+
+  return (
+    <LeadDetailView
+      mode="admin"
+      lead={lead}
+      saving={saving}
+      onBack={() => navigate("/admin")}
+      onAdminSave={handleAdminSave}
+      sharedJournal={sharedJournal}
+      canEditJournal
+      onDeleteJournalEntry={handleDeleteJournalEntry}
+      onEditJournalEntry={handleEditJournalEntry}
+      topBadges={adminBadges}
+      sidebar={adminSidebar}
+    />
   );
 }

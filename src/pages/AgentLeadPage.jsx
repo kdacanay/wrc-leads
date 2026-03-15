@@ -17,6 +17,7 @@ import {
 
 import LeadFormAgent from "../components/LeadFormAgent";
 import JournalTimeline from "../components/JournalTimeline";
+import LeadDetailView from "../components/LeadDetailView";
 
 // ---------- Small helpers ----------
 function formatDate(value) {
@@ -395,187 +396,17 @@ if (!turningOnNow) {
     );
   }
 
-  return (
-    <div className="space-y-6 text-sm">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">
-            {lead.firstName} {lead.lastName}
-          </h1>
-          <p className="text-xs text-gray-500">
-            Lead ID:{" "}
-            <span className="font-mono bg-gray-100 px-1.5 py-0.5 rounded">
-              {lead.id}
-            </span>
-          </p>
-
-          <p className="text-xs text-gray-500 mt-1">
-            Assigned agent:{" "}
-            {lead.assignedAgentName ? (
-              <>
-                <span className="font-medium text-gray-800">
-                  {lead.assignedAgentName}
-                </span>
-                {lead.assignedAgentEmail ? (
-                  <span className="text-gray-500">
-                    {" "}
-                    · {lead.assignedAgentEmail}
-                  </span>
-                ) : null}
-              </>
-            ) : (
-              <span className="italic text-gray-400">Unassigned</span>
-            )}
-          </p>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => navigate("/agent")}
-          className="text-xs px-3 py-1.5 rounded-full border border-gray-300 text-gray-700 hover:bg-gray-50"
-        >
-          ← Back to My Leads
-        </button>
-      </div>
-
-      {/* Status banner */}
-      {status.message ? (
-        <div
-          className={`text-xs px-3 py-2 rounded-lg border ${
-            status.type === "success"
-              ? "border-green-200 bg-green-50 text-green-700"
-              : "border-red-200 bg-red-50 text-red-700"
-          }`}
-        >
-          {status.message}
-        </div>
-      ) : null}
-
-      {/* Admin-controlled callouts */}
-      <div className="space-y-3">
-        {lead.propertyAddress?.trim() ? (
-          <Callout tone="blue" title="Property Address (set by admin)">
-            {lead.propertyAddress}
-          </Callout>
-        ) : null}
-
-        {lead.actionItem?.trim() ? (
-          <Callout tone="amber" title="Next Action Item (from admin)">
-            {lead.actionItem}
-          </Callout>
-        ) : (
-          <Callout tone="gray" title="Next Action Item (from admin)">
-            No action item yet.
-          </Callout>
-        )}
-      </div>
-
-      {/* Main layout */}
-      <div className="grid lg:grid-cols-3 gap-6">
-        {/* LEFT */}
-        <div className="lg:col-span-2 space-y-6">
-          <Card
-            title="Update This Lead"
-            right={
-              <span className="text-[11px] text-gray-500">
-                Only approved fields save.
-              </span>
-            }
-          >
-            <LeadFormAgent lead={lead} onSave={handleAgentSave} saving={saving} />
-          </Card>
-
-          <Card
-            title="Journal"
-            right={
-              <span className="text-[11px] text-gray-500">
-                Shows shared notes from admin + your notes.
-              </span>
-            }
-          >
-            {agentJournal.length === 0 ? (
-              <div className="text-xs text-gray-500">No journal entries yet.</div>
-            ) : (
-              <JournalTimeline entries={agentJournal} />
-            )}
-          </Card>
-        </div>
-
-        {/* RIGHT */}
-        <div className="space-y-6">
-          <Card title="Contact">
-            <div className="text-xs text-gray-800 space-y-1">
-              {lead.phone ? (
-                <div>📞 {lead.phone}</div>
-              ) : (
-                <div className="text-gray-400 italic">No phone on file.</div>
-              )}
-              {lead.email ? (
-                <div>
-                  ✉️{" "}
-                  <a
-                    href={`mailto:${lead.email}`}
-                    className="text-blue-700 hover:underline"
-                  >
-                    {lead.email}
-                  </a>
-                </div>
-              ) : (
-                <div className="text-gray-400 italic">No email on file.</div>
-              )}
-            </div>
-          </Card>
-
-          <Card title="Dates">
-            <div className="text-xs text-gray-800 space-y-2">
-              <div>
-                <div className="text-[11px] text-gray-500">Registered</div>
-                <div className="text-gray-900">
-                  {lead.registrationDate
-                    ? formatDate(lead.registrationDate)
-                    : lead.registeredDateRaw
-                    ? formatDate(lead.registeredDateRaw)
-                    : "—"}
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[11px] text-gray-500">
-                  Due Date (set by admin)
-                </div>
-                <div className="text-gray-900">
-                  {formatDate(lead.nextEvaluationDate) || "—"}
-                </div>
-                <div className="text-[10px] text-gray-500 mt-0.5">
-                  This is your next follow-up deadline.
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          <Card title="Latest Journal Note (yours)">
-            <div className="text-xs text-gray-800">
-              {latestAgentJournalText ? (
-                <>
-                  <div className="text-gray-700 whitespace-pre-wrap">
-                    {latestAgentJournalText}
-                  </div>
-                  <div className="mt-1 text-[10px] text-gray-500">
-                    {agentJournal[0]?.createdAt
-                      ? formatDateTime(toMillis(agentJournal[0].createdAt))
-                      : ""}
-                  </div>
-                </>
-              ) : (
-                <span className="text-gray-400 italic">
-                  No journal entries yet.
-                </span>
-              )}
-            </div>
-          </Card>
-        </div>
-      </div>
-    </div>
+   return (
+    <LeadDetailView
+      mode="agent"
+      lead={lead}
+      saving={saving}
+      onBack={() => navigate("/agent")}
+      onAgentSave={handleAgentSave}
+      sharedJournal={agentJournal}
+      statusMessage={status.message}
+      statusType={status.type}
+      latestAgentJournalText={latestAgentJournalText}
+    />
   );
 }
