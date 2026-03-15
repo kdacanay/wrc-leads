@@ -29,7 +29,6 @@ export const RELATIONSHIP_RANK_OPTIONS = [
   { value: "34", label: "34% likelihood" },
   { value: "56", label: "56% likelihood" },
   { value: "78", label: "78% likelihood" },
-  { value: "100", label: "100% likelihood" },
 ];
 
 export const URGENCY_OPTIONS = [

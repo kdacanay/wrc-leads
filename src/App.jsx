@@ -1,5 +1,5 @@
 import React from "react";
-import { Routes, Route, Navigate, Outlet } from "react-router-dom";
+import { Routes, Route, Navigate, Outlet, useLocation } from "react-router-dom";
 import AppShell from "./components/AppShell";
 import AgentShell from "./components/AgentShell";
 import LoginPage from "./pages/LoginPage";
@@ -49,6 +49,7 @@ function RoleRedirect() {
 
   if (loading) return <LoadingScreen />;
   if (!user) return <Navigate to="/login" replace />;
+  if (!role) return <LoadingScreen text="Loading role..." />;
 
   if (role === "admin") return <Navigate to="/admin" replace />;
   if (role === "agent") return <Navigate to="/agent" replace />;
@@ -57,82 +58,113 @@ function RoleRedirect() {
 }
 
 export default function App() {
+  const location = useLocation();
+  const state = location.state;
+  const backgroundLocation = state?.backgroundLocation;
+
   return (
-    <Routes>
-      {/* Public */}
-      <Route path="/login" element={<LoginPage />} />
+    <>
+      <Routes location={backgroundLocation || location}>
+        {/* Public */}
+        <Route path="/login" element={<LoginPage />} />
 
-      {/* Signed-in */}
-      <Route element={<RequireAuth />}>
-        {/* Agreement gate: everything (except /lead-agreement) */}
-        <Route element={<RequireLeadAgreement />}>
-          {/* Root */}
-          <Route
-            path="/"
-            element={
-              <AppShell>
-                <RoleRedirect />
-              </AppShell>
-            }
-          />
-
-          {/* ADMIN */}
-          <Route element={<RequireAdmin />}>
+        {/* Signed-in */}
+        <Route element={<RequireAuth />}>
+          {/* Agreement gate: everything (except /lead-agreement) */}
+          <Route element={<RequireLeadAgreement />}>
+            {/* Root */}
             <Route
-              path="/admin"
+              path="/"
               element={
                 <AppShell>
-                  <AdminDashboard />
+                  <RoleRedirect />
                 </AppShell>
               }
             />
-            <Route
-  path="/admin/agents"
-  element={
-    <AppShell>
-      <AdminAgentSummary />
-    </AppShell>
-  }
-/>
-            <Route
-              path="/admin/lead/:leadId"
-              element={
-                <AppShell>
-                  <AdminLeadPage />
-                </AppShell>
-              }
-            />
+
+            {/* ADMIN */}
+            <Route element={<RequireAdmin />}>
+              <Route
+                path="/admin"
+                element={
+                  <AppShell>
+                    <AdminDashboard />
+                  </AppShell>
+                }
+              />
+              <Route
+                path="/admin/agents"
+                element={
+                  <AppShell>
+                    <AdminAgentSummary />
+                  </AppShell>
+                }
+              />
+              <Route
+                path="/admin/lead/:leadId"
+                element={
+                  <AppShell>
+                    <AdminLeadPage />
+                  </AppShell>
+                }
+              />
+            </Route>
+
+            {/* AGENT */}
+            <Route element={<RequireAgent />}>
+              <Route
+                path="/agent"
+                element={
+                  <AgentShell>
+                    <AgentHomePage />
+                  </AgentShell>
+                }
+              />
+              <Route
+                path="/agent/:leadId"
+                element={
+                  <AgentShell>
+                    <AgentLeadPage />
+                  </AgentShell>
+                }
+              />
+            </Route>
           </Route>
 
-          {/* AGENT */}
-          <Route element={<RequireAgent />}>
-            <Route
-              path="/agent"
-              element={
-                <AgentShell>
-                  <AgentHomePage />
-                </AgentShell>
-              }
-            />
-
-            {/* ✅ Restore this so clicking a lead works */}
-            <Route
-              path="/agent/:leadId"
-              element={
-                <AgentShell>
-                  <AgentLeadPage />
-                                </AgentShell>
-              }
-            />
-          </Route>
+          <Route path="/lead-agreement" element={<LeadAgreementPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
+      </Routes>
 
-        {/* Agreement page is allowed while signed in */}
-        <Route path="/lead-agreement" element={<LeadAgreementPage />} />
+      {backgroundLocation && (
+        <Routes>
+          <Route element={<RequireAuth />}>
+            <Route element={<RequireLeadAgreement />}>
+              <Route element={<RequireAdmin />}>
+                <Route
+                  path="/admin/lead/:leadId"
+                  element={
+                    <AppShell>
+                      <AdminLeadPage />
+                    </AppShell>
+                  }
+                />
+              </Route>
 
-        {/* Catch-all */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
+              <Route element={<RequireAgent />}>
+                <Route
+                  path="/agent/:leadId"
+                  element={
+                    <AgentShell>
+                      <AgentLeadPage />
+                    </AgentShell>
+                  }
+                />
+              </Route>
+            </Route>
+          </Route>
+        </Routes>
+      )}
+    </>
   );
 }

@@ -96,13 +96,25 @@ export function AuthProvider({ children }) {
     return !accepted || version !== LEAD_POLICY_VERSION;
   }, [user?.uid, profile]);
 
-  const logout = async () => {
-  if (auth.currentUser?.uid) {
-    sessionStorage.removeItem(
-      `wrc_leads_agreement_ack_${auth.currentUser.uid}`
-    );
+const logout = async () => {
+  try {
+    const uid = auth.currentUser?.uid;
+
+    if (uid) {
+      sessionStorage.removeItem(`wrc_leads_agreement_ack_${uid}`);
+    }
+
+    // Clear React auth state immediately
+    setUser(null);
+    setRole(null);
+    setProfile(null);
+    setLoading(false);
+
+    await signOut(auth);
+  } catch (err) {
+    console.error("[Auth] Logout error", err);
+    throw err;
   }
-  await signOut(auth);
 };
 
 

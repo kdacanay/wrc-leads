@@ -189,7 +189,7 @@ export default function AdminLeadPage() {
   const { leadId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
-
+const [closing, setClosing] = useState(false);
   const [lead, setLead] = useState(null);
 
   // Subcollection journal (shared view for agent/admin)
@@ -807,7 +807,12 @@ for (const c of changes) {
 }
 
 
-
+function handleClosePanel() {
+  setClosing(true);
+  setTimeout(() => {
+    navigate("/admin");
+  }, 250);
+}
 async function handleCreateAndAssignAgent() {
   if (!lead) return;
 
@@ -1014,22 +1019,59 @@ const bodyLines = [
     },
   ];
 
-  const adminSidebar = (
-    <div className="lg:sticky lg:top-[88px] space-y-6">
-      <div className="border border-gray-200 rounded-xl bg-white p-4">
-        <h3 className="text-sm font-semibold text-gray-900 mb-3">Agent & notifications</h3>
+const adminSidebar = (
+  
+  <div className="xl:sticky xl:top-[88px] space-y-6">
+  <section className="bg-amber-50 rounded-2xl shadow-lg border border-amber-200 overflow-hidden">
+  <div className="px-5 py-4 border-b border-amber-200">
+    <h3 className="text-lg font-extrabold text-amber-900">
+      Action item (agent-visible)
+    </h3>
+  </div>
 
-        <div className="text-xs text-gray-700">
-          <div className="text-[11px] text-gray-500 mb-1">Current assignment</div>
+  <div className="px-5 py-5 space-y-3">
+    <p className="text-sm text-amber-900/80">
+      This shows on the agent dashboard under “Next Action Item.”
+    </p>
 
-          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+    <textarea
+      rows={4}
+      className="w-full border border-amber-300 rounded-lg px-3 py-2 text-sm bg-white"
+      placeholder="Example: Call by Friday to schedule a buyer consult…"
+      value={actionItemDraft}
+      onChange={(e) => setActionItemDraft(e.target.value)}
+    />
+
+    <p className="text-[11px] text-amber-900/70">
+      Saves when you click <span className="font-semibold">Save lead</span>.
+    </p>
+  </div>
+</section>
+    <section className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+      <div className="px-5 py-4 border-b border-gray-200 bg-white">
+        <h3 className="text-lg font-extrabold text-[var(--color-wrcBlack)]">
+          Agent & notifications
+        </h3>
+      </div>
+
+      <div className="px-5 py-5 space-y-5">
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500 mb-2">
+            Current assignment
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             {lead.assignedAgentName ? (
               <>
-                <div className="font-medium">{lead.assignedAgentName}</div>
+                <div className="font-semibold text-gray-900">
+                  {lead.assignedAgentName}
+                </div>
                 {lead.assignedAgentEmail ? (
-                  <div className="text-blue-700 text-[11px] mt-0.5">{lead.assignedAgentEmail}</div>
+                  <div className="text-blue-700 text-sm mt-1">
+                    {lead.assignedAgentEmail}
+                  </div>
                 ) : (
-                  <div className="text-[11px] text-gray-400 mt-0.5">No email on file</div>
+                  <div className="text-sm text-gray-400 mt-1">No email on file</div>
                 )}
               </>
             ) : (
@@ -1038,13 +1080,15 @@ const bodyLines = [
           </div>
         </div>
 
-        <div className="mt-4">
-          <div className="text-[11px] font-semibold text-gray-700 mb-1">Assign / change agent</div>
+        <div>
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500 mb-2">
+            Assign / change agent
+          </div>
 
           <select
             value={selectedAgentId}
             onChange={(e) => setSelectedAgentId(e.target.value)}
-            className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
           >
             <option value="">— Unassigned —</option>
             {allAssignableAgents.map((a) => (
@@ -1054,77 +1098,79 @@ const bodyLines = [
             ))}
           </select>
 
-          <div className="mt-4 border-t pt-4">
-            <div className="text-[11px] font-semibold text-gray-700 mb-2">
-              Also assigned agents
-            </div>
-
-            <div className="flex gap-2">
-              <select
-                value={secondaryAgentId}
-                onChange={(e) => setSecondaryAgentId(e.target.value)}
-                className="flex-1 border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-              >
-                <option value="">— Add additional agent —</option>
-                {allAssignableAgents
-                  .filter((a) => !a.isPlaceholder)
-                  .filter((a) => a.id !== (lead.assignedAgentId || ""))
-                  .map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {(a.name || a.email || "Unnamed user") + (a.email ? ` (${a.email})` : "")}
-                    </option>
-                  ))}
-              </select>
-
-              <button
-                type="button"
-                onClick={handleAddSecondaryAgent}
-                disabled={!secondaryAgentId || updatingAssignments}
-                className="px-3 py-2 rounded-lg bg-black text-white text-[12px] disabled:opacity-60"
-              >
-                {updatingAssignments ? "..." : "Add"}
-              </button>
-            </div>
-
-            {secondaryAssignedAgents.length > 0 ? (
-              <div className="mt-3 space-y-2">
-                {secondaryAssignedAgents.map((a) => (
-                  <div
-                    key={a.id}
-                    className="flex items-center justify-between border border-gray-200 rounded-lg px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-[12px] font-medium text-gray-800 truncate">
-                        {a.name || a.email}
-                      </div>
-                      {a.email ? (
-                        <div className="text-[11px] text-gray-500 truncate">{a.email}</div>
-                      ) : null}
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveSecondaryAgent(a)}
-                      disabled={updatingAssignments}
-                      className="text-[11px] px-2 py-1 rounded border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="mt-2 text-[11px] text-gray-500">No additional agents assigned.</div>
-            )}
-          </div>
-
-          <p className="mt-2 text-[10px] text-gray-500">
-            Assignment changes save when you click <span className="font-semibold">“Save lead”</span>.
+          <p className="mt-2 text-[11px] text-gray-500">
+            Assignment changes save when you click <span className="font-semibold">Save lead</span>.
           </p>
         </div>
 
-        <div className="mt-4 border-t pt-4">
-          <div className="text-[11px] font-semibold text-gray-700 mb-2">Assign unregistered agent</div>
+        <div className="pt-4 border-t border-gray-200">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500 mb-2">
+            Also assigned agents
+          </div>
+
+          <div className="flex gap-2">
+            <select
+              value={secondaryAgentId}
+              onChange={(e) => setSecondaryAgentId(e.target.value)}
+              className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="">— Add additional agent —</option>
+              {allAssignableAgents
+                .filter((a) => !a.isPlaceholder)
+                .filter((a) => a.id !== (lead.assignedAgentId || ""))
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {(a.name || a.email || "Unnamed user") + (a.email ? ` (${a.email})` : "")}
+                  </option>
+                ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={handleAddSecondaryAgent}
+              disabled={!secondaryAgentId || updatingAssignments}
+              className="px-4 py-2 rounded-lg bg-black text-[#fff200] text-sm font-bold disabled:opacity-60"
+            >
+              {updatingAssignments ? "..." : "Add"}
+            </button>
+          </div>
+
+          {secondaryAssignedAgents.length > 0 ? (
+            <div className="mt-3 space-y-2">
+              {secondaryAssignedAgents.map((a) => (
+                <div
+                  key={a.id}
+                  className="flex items-center justify-between rounded-xl border border-gray-200 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-gray-800 truncate">
+                      {a.name || a.email}
+                    </div>
+                    {a.email ? (
+                      <div className="text-xs text-gray-500 truncate">{a.email}</div>
+                    ) : null}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveSecondaryAgent(a)}
+                    disabled={updatingAssignments}
+                    className="text-xs px-3 py-1 rounded-lg border border-red-300 text-red-700 hover:bg-red-50 disabled:opacity-60"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-2 text-sm text-gray-500">No additional agents assigned.</div>
+          )}
+        </div>
+
+        <div className="pt-4 border-t border-gray-200">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-gray-500 mb-2">
+            Assign unregistered agent
+          </div>
 
           <div className="space-y-2">
             <input
@@ -1132,19 +1178,19 @@ const bodyLines = [
               placeholder="Agent full name"
               value={newAgentName}
               onChange={(e) => setNewAgentName(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
             />
             <input
               type="email"
               placeholder="Email (optional)"
               value={newAgentEmail}
               onChange={(e) => setNewAgentEmail(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
             />
             <button
               type="button"
               onClick={handleCreateAndAssignAgent}
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] hover:bg-gray-50"
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 text-sm font-semibold hover:bg-gray-50"
             >
               Create & assign
             </button>
@@ -1152,145 +1198,162 @@ const bodyLines = [
         </div>
 
         {canEmailAgent && (
-          <div className="mt-4 border-t pt-4 space-y-2">
+          <div className="pt-4 border-t border-gray-200 space-y-2">
             <button
               type="button"
               onClick={handleEmailAgentAboutLatest}
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50"
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 text-sm font-semibold hover:bg-gray-50"
             >
               Email agent about latest update
             </button>
             <button
               type="button"
               onClick={handleEmailAgentInvite}
-              className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50"
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 text-sm font-semibold hover:bg-gray-50"
             >
               Email invite to register
             </button>
           </div>
         )}
       </div>
+    </section>
 
-      <div className="border border-red-200 bg-red-50 rounded-xl p-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-xs font-semibold text-red-900">Bad Lead (Admin Only)</div>
-            <div className="text-[11px] text-red-900/80 mt-1">
-              Use this only after reviewing the rejection request.
-            </div>
-          </div>
+    <section className="bg-red-50 rounded-2xl shadow-lg border border-red-200 overflow-hidden">
+      <div className="px-5 py-4 border-b border-red-200">
+        <h3 className="text-lg font-extrabold text-red-900">
+          Bad Lead (Admin Only)
+        </h3>
+      </div>
 
-          <button
-            type="button"
-            onClick={async () => {
-              const ok = window.confirm("Mark this lead as BAD LEAD? This is admin-only.");
-              if (!ok) return;
+      <div className="px-5 py-5 space-y-4">
+        <p className="text-sm text-red-900/80">
+          Use this only after reviewing the rejection request.
+        </p>
 
-              const msg = "🚫 Admin marked this lead as BAD LEAD.";
+        <button
+          type="button"
+          onClick={async () => {
+            const ok = window.confirm("Mark this lead as BAD LEAD? This is admin-only.");
+            if (!ok) return;
 
-              await updateDoc(doc(db, "leads", leadId), {
-                status: "bad_lead",
-                rejectionStatus: "approved",
-                updatedAt: serverTimestamp(),
-                updatedBy: user?.uid || "",
-                latestActivity: msg,
-                latestActivityAt: serverTimestamp(),
-                journalLastEntry: msg,
-              });
+            const msg = "🚫 Admin marked this lead as BAD LEAD.";
 
-              await addJournalEntry(msg, "admin-update", "shared");
-              await addAdminNotification(msg);
-            }}
-            className="px-3 py-2 rounded-lg bg-red-600 text-white text-[12px] hover:bg-red-700"
-          >
-            Mark Bad Lead
-          </button>
-        </div>
+            await updateDoc(doc(db, "leads", leadId), {
+              status: "bad_lead",
+              rejectionStatus: "approved",
+              updatedAt: serverTimestamp(),
+              updatedBy: user?.uid || "",
+              latestActivity: msg,
+              latestActivityAt: serverTimestamp(),
+              journalLastEntry: msg,
+            });
+
+            await addJournalEntry(msg, "admin-update", "shared");
+            await addAdminNotification(msg);
+          }}
+          className="w-full px-4 py-3 rounded-lg bg-red-600 text-white text-sm font-bold hover:bg-red-700"
+        >
+          Mark Bad Lead
+        </button>
 
         {lead?.rejectionRequested ? (
-          <div className="mt-3 text-[11px] text-red-900/90 whitespace-pre-wrap">
+          <div className="text-sm text-red-900 whitespace-pre-wrap">
             <span className="font-semibold">Agent reason:</span>{" "}
             {lead.rejectionReason || "—"}
           </div>
         ) : null}
       </div>
+    </section>
 
-      <div className="border border-gray-200 rounded-xl bg-white p-4">
-        <h3 className="text-sm font-semibold text-gray-900 mb-2">Assigned agent email</h3>
-        <p className="text-[11px] text-gray-500 mb-3">
+    <section className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+      <div className="px-5 py-4 border-b border-gray-200 bg-white">
+        <h3 className="text-lg font-extrabold text-[var(--color-wrcBlack)]">
+          Assigned agent email
+        </h3>
+      </div>
+
+      <div className="px-5 py-5 space-y-3">
+        <p className="text-sm text-gray-500">
           Use this when a lead was imported with an agent name but no email.
         </p>
 
-        <div className="space-y-2">
-          <input
-            type="email"
-            value={manualAgentEmail}
-            onChange={(e) => setManualAgentEmail(e.target.value)}
-            placeholder="agent@example.com"
-            className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
-          />
-          <button
-            type="button"
-            onClick={handleSaveAgentEmail}
-            disabled={savingAgentEmail}
-            className="w-full px-3 py-2 rounded-lg border border-gray-300 text-[12px] text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-          >
-            {savingAgentEmail ? "Saving..." : "Save agent email"}
-          </button>
-        </div>
-      </div>
-
-      <div className="border border-amber-200 rounded-xl bg-amber-50 p-4">
-        <h3 className="text-sm font-semibold text-amber-900 mb-1">Action item (agent-visible)</h3>
-        <p className="text-[11px] text-amber-900/80 mb-3">
-          This shows on the agent dashboard under “Next Action Item.”
-        </p>
-
-        <textarea
-          rows={4}
-          className="w-full border border-amber-300 rounded-lg px-2 py-2 text-[12px] bg-white"
-          placeholder="Example: Call by Friday to schedule a buyer consult…"
-          value={actionItemDraft}
-          onChange={(e) => setActionItemDraft(e.target.value)}
+        <input
+          type="email"
+          value={manualAgentEmail}
+          onChange={(e) => setManualAgentEmail(e.target.value)}
+          placeholder="agent@example.com"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
         />
 
-        <p className="mt-2 text-[10px] text-amber-900/70">
-          Saves when you click <span className="font-semibold">“Save lead”</span>.
-        </p>
+        <button
+          type="button"
+          onClick={handleSaveAgentEmail}
+          disabled={savingAgentEmail}
+          className="w-full px-4 py-2 rounded-lg border border-gray-300 text-sm font-semibold hover:bg-gray-50 disabled:opacity-60"
+        >
+          {savingAgentEmail ? "Saving..." : "Save agent email"}
+        </button>
+      </div>
+    </section>
+
+
+
+    <section className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+      <div className="px-5 py-4 border-b border-gray-200 bg-white">
+        <h3 className="text-lg font-extrabold text-[var(--color-wrcBlack)]">
+          Property address (agent-visible)
+        </h3>
       </div>
 
-      <div className="border border-gray-200 rounded-xl bg-white p-4">
-        <h3 className="text-sm font-semibold text-gray-900 mb-1">Property address (agent-visible)</h3>
-        <p className="text-[11px] text-gray-500 mb-3">This is the address the lead is asking about.</p>
+      <div className="px-5 py-5 space-y-3">
+        <p className="text-sm text-gray-500">
+          This is the address the lead is asking about.
+        </p>
 
         <input
           type="text"
           value={propertyAddressDraft}
           onChange={(e) => setPropertyAddressDraft(e.target.value)}
           placeholder='e.g., "123 Main St, West Chester, PA 19382"'
-          className="w-full border border-gray-300 rounded-lg px-2 py-2 text-[12px]"
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
         />
 
-        <p className="mt-2 text-[10px] text-gray-500">
-          Saves when you click <span className="font-semibold">“Save lead”</span>.
+        <p className="text-[11px] text-gray-500">
+          Saves when you click <span className="font-semibold">Save lead</span>.
         </p>
       </div>
-    </div>
-  );
+    </section>
+  </div>
+);
 
-  return (
-    <LeadDetailView
-      mode="admin"
-      lead={lead}
-      saving={saving}
-      onBack={() => navigate("/admin")}
-      onAdminSave={handleAdminSave}
-      sharedJournal={sharedJournal}
-      canEditJournal
-      onDeleteJournalEntry={handleDeleteJournalEntry}
-      onEditJournalEntry={handleEditJournalEntry}
-      topBadges={adminBadges}
-      sidebar={adminSidebar}
+return (
+  <div className="fixed inset-0 z-50">
+    <div
+      className="absolute inset-0 bg-black/40"
+      onClick={handleClosePanel}
     />
-  );
+
+    <div
+      className={`absolute inset-y-0 right-0 w-full max-w-[1200px] bg-[var(--color-wrcGray)] shadow-2xl border-l border-gray-200 overflow-y-auto ${
+        closing
+          ? "animate-[slideOutRight_.25s_ease-in]"
+          : "animate-[slideInRight_.25s_ease-out]"
+      }`}
+    >
+      <LeadDetailView
+        mode="admin"
+        lead={lead}
+        saving={saving}
+        onBack={handleClosePanel}
+        onAdminSave={handleAdminSave}
+        sharedJournal={sharedJournal}
+        canEditJournal
+        onDeleteJournalEntry={handleDeleteJournalEntry}
+        onEditJournalEntry={handleEditJournalEntry}
+        topBadges={adminBadges}
+        sidebar={adminSidebar}
+      />
+    </div>
+  </div>
+);
 }

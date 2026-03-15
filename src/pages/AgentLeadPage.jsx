@@ -80,8 +80,11 @@ function Callout({ tone = "blue", title, children }) {
   );
 }
 
+
+
 // ---------- Page ----------
 export default function AgentLeadPage() {
+ 
   const { leadId } = useParams();
   const decodedLeadId = useMemo(
     () => decodeURIComponent(leadId || ""),
@@ -90,7 +93,7 @@ export default function AgentLeadPage() {
 
   const navigate = useNavigate();
   const { user, role } = useAuth();
-
+ const [closing, setClosing] = useState(false);
   const [lead, setLead] = useState(null);
   const [agentJournal, setAgentJournal] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -215,6 +218,13 @@ export default function AgentLeadPage() {
     return agentJournal[0]?.text || "";
   }, [agentJournal]);
 
+
+  function handleClosePanel() {
+  setClosing(true);
+  setTimeout(() => {
+    navigate("/agent");
+  }, 250);
+}
   async function handleAgentSave(form) {
     if (!lead) return;
     if (unauthorized) return;
@@ -396,17 +406,32 @@ if (!turningOnNow) {
     );
   }
 
-   return (
-    <LeadDetailView
-      mode="agent"
-      lead={lead}
-      saving={saving}
-      onBack={() => navigate("/agent")}
-      onAgentSave={handleAgentSave}
-      sharedJournal={agentJournal}
-      statusMessage={status.message}
-      statusType={status.type}
-      latestAgentJournalText={latestAgentJournalText}
+return (
+  <div className="fixed inset-0 z-50">
+    <div
+      className="absolute inset-0 bg-black/40"
+      onClick={handleClosePanel}
     />
-  );
+
+    <div
+      className={`absolute inset-y-0 right-0 w-full max-w-[1100px] bg-[var(--color-wrcGray)] shadow-2xl border-l border-gray-200 overflow-y-auto ${
+        closing
+          ? "animate-[slideOutRight_.25s_ease-in]"
+          : "animate-[slideInRight_.25s_ease-out]"
+      }`}
+    >
+      <LeadDetailView
+        mode="agent"
+        lead={lead}
+        saving={saving}
+        onBack={handleClosePanel}
+        onAgentSave={handleAgentSave}
+        sharedJournal={agentJournal}
+        statusMessage={status.message}
+        statusType={status.type}
+        latestAgentJournalText={latestAgentJournalText}
+      />
+    </div>
+  </div>
+);
 }

@@ -30,7 +30,7 @@ import {
 } from "../constants/leadOptions";
 // import useAgents from "../hooks/useAgents";
 import useAssignableAgents from "../hooks/useAssignableAgents";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 // import { normName, normEmail } from "../utils/normalize";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { importVleadsXlsx } from "../utils/importVleadsXlsx";
@@ -865,11 +865,12 @@ async function createAgentOnlyLink(lead) {
 // ---------- Main Admin Dashboard ----------
 
 export default function AdminDashboard() {
+  const location = useLocation();
   const [showNewClosing, setShowNewClosing] = useState(false);
 
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   // Notifications
 // Notifications
 const [notifications, setNotifications] = useState([]);
@@ -3468,15 +3469,21 @@ return (
   Agent Summary
 </button>
 
-        <button
-          type="button"
-          onClick={() => {
-            window.location.href = "/login";
-          }}
-          className="px-4 py-2 rounded-md bg-black text-white font-semibold hover:opacity-90"
-        >
-          Logout
-        </button>
+<button
+  type="button"
+  onClick={async () => {
+    try {
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (err) {
+      console.error("Logout failed:", err);
+      alert("There was a problem logging out.");
+    }
+  }}
+  className="px-4 py-2 rounded-md bg-black text-white font-semibold hover:opacity-90"
+>
+  Logout
+</button>
       </div>
     </div>
   </div>
@@ -4023,7 +4030,11 @@ return (
               URGENCY_LABELS,
               SOURCE_LABELS,
             }}
-            onOpenLead={(id) => navigate(`/admin/lead/${encodeURIComponent(id)}`)}
+            onOpenLead={(id) =>
+  navigate(`/admin/lead/${encodeURIComponent(id)}`, {
+    state: { backgroundLocation: location },
+  })
+}
 
           />
         </div>
